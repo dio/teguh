@@ -302,7 +302,7 @@ make format
 
 ### Go formatting
 
-`make format` rewrites Go files in-place via `gofmt` and `goimports`. Run it before committing. `make lint` enforces linter rules but does not check formatting.
+`make format` rewrites Go files in-place via `gofmt` and `goimports`. Run it before committing. `make lint` enforces linter rules but does not check formatting. `make check-format` (used in CI) fails if any file needs reformatting.
 
 ## License
 

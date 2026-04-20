@@ -20,6 +20,10 @@ format: ## Format all Go code with golangci-lint fmt
 lint: ## Run golangci-lint on all modules
 	for m in $(MODULES); do (cd "$$m" && go tool golangci-lint run ./...); done
 
+.PHONY: check-format
+check-format: ## Fail if any Go file needs reformatting (CI)
+	for m in $(MODULES); do (cd "$$m" && go tool golangci-lint fmt --diff ./...); done
+
 .PHONY: test
 test: ## Run unit tests
 	go test -race ./...
