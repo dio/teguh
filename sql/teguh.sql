@@ -288,6 +288,16 @@ begin
     't_' || p_queue_name || '_cani',
     't_' || p_queue_name
   );
+
+  -- Partial index for ticker/recovery-sweep of delayed-spawn pending tasks.
+  -- Covers the state='pending' AND available_at IS NOT NULL case that the
+  -- sleeping-only index (t_<q>_sai) does not include.
+  execute format(
+    'create index if not exists %I on teguh.%I (available_at)
+       where state = ''pending'' and available_at is not null',
+    't_' || p_queue_name || '_pai',
+    't_' || p_queue_name
+  );
 end;
 $$;
 
@@ -953,11 +963,9 @@ create or replace function teguh.set_task_checkpoint_state(
   language plpgsql
 as $$
 declare
-  v_now              timestamptz := teguh.current_time();
-  v_new_attempt      integer;
-  v_task_state       text;
-  v_existing_owner   uuid;
-  v_existing_attempt integer;
+  v_now         timestamptz := teguh.current_time();
+  v_new_attempt integer;
+  v_task_state  text;
 begin
   if p_step_name is null or length(trim(p_step_name)) = 0 then
     raise exception 'step_name must be provided';
@@ -997,32 +1005,21 @@ begin
     using p_owner_run, v_now, p_extend_claim_by;
   end if;
 
-  -- Check if existing checkpoint belongs to an older or same attempt
+  -- Upsert the checkpoint. The ordering guard (join to r_<q>) was dead code:
+  -- r_<q> only contains active runs, and UNIQUE(task_id) on r_<q> prevents
+  -- two concurrent runs for the same task, so there can never be a live run
+  -- with a higher attempt number. Just always overwrite.
   execute format(
-    'select c.owner_run_id, r.attempt
-       from teguh.%I c
-       left join teguh.%I r on r.run_id = c.owner_run_id
-      where c.task_id = $1
-        and c.checkpoint_name = $2',
-    'c_' || p_queue_name,
-    'r_' || p_queue_name
-  )
-  into v_existing_owner, v_existing_attempt
-  using p_task_id, p_step_name;
-
-  if v_existing_owner is null or v_existing_attempt is null or v_new_attempt >= v_existing_attempt then
-    execute format(
-      'insert into teguh.%I
-          (task_id, checkpoint_name, state, status, owner_run_id, updated_at)
-       values ($1, $2, $3, ''committed'', $4, $5)
-       on conflict (task_id, checkpoint_name)
-       do update set state        = excluded.state,
-                     status       = excluded.status,
-                     owner_run_id = excluded.owner_run_id,
-                     updated_at   = excluded.updated_at',
-      'c_' || p_queue_name
-    ) using p_task_id, p_step_name, p_state, p_owner_run, v_now;
-  end if;
+    'insert into teguh.%I
+        (task_id, checkpoint_name, state, status, owner_run_id, updated_at)
+     values ($1, $2, $3, ''committed'', $4, $5)
+     on conflict (task_id, checkpoint_name)
+     do update set state        = excluded.state,
+                   status       = excluded.status,
+                   owner_run_id = excluded.owner_run_id,
+                   updated_at   = excluded.updated_at',
+    'c_' || p_queue_name
+  ) using p_task_id, p_step_name, p_state, p_owner_run, v_now;
 end;
 $$;
 
@@ -1191,7 +1188,7 @@ begin
     v_timeout_at := v_now + (p_timeout::double precision * interval '1 second');
   end if;
 
-  v_available_at := coalesce(v_timeout_at, 'infinity'::timestamptz);
+  v_available_at := v_timeout_at; -- NULL means wait forever; ticker/sweep skip NULL rows
 
   -- Fast path: checkpoint already committed (step was completed on a prior attempt)
   execute format(
@@ -1462,7 +1459,10 @@ declare
   v_now        timestamptz := teguh.current_time();
   v_task_state text;
 begin
-  -- Lock the task (consistent lock order: r_ then t_)
+  -- Consistent lock order: r_<q> first (same as complete_run/fail_run which join
+  -- from r to t), then t_<q>. Both are locked by task_id to handle the case where
+  -- no active run exists (sleeping task). No deadlock risk as long as all callers
+  -- acquire r before t.
   execute format(
     'select run_id from teguh.%I
       where task_id = $1

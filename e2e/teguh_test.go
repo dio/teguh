@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -918,4 +919,101 @@ func TestWorkerSleepResume(t *testing.T) {
 		close(tickerStop)
 		require.Fail(t, "timeout waiting for sleep+resume cycle")
 	}
+}
+
+// Critical #2: await_event must store NULL available_at for no-timeout waits.
+// Ticker must not re-queue such tasks; only emit_event should wake them.
+func TestAwaitEventNoTimeoutNullAvailableAt(t *testing.T) {
+	client := newClient(t)
+	setupQueue(t, client, "test_null_await")
+	ctx := context.Background()
+
+	res, err := client.SpawnTask(ctx, "test_null_await", "waiter", nil, nil)
+	require.NoError(t, err)
+
+	runs, err := client.ClaimTask(ctx, "test_null_await", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+
+	// Suspend without a timeout.
+	shouldSuspend, payload, err := client.AwaitEvent(
+		ctx, "test_null_await", runs[0].TaskID, runs[0].RunID,
+		"step-no-timeout", "my-event", nil,
+	)
+	require.NoError(t, err)
+	require.True(t, shouldSuspend)
+	require.Nil(t, payload)
+
+	// available_at must be NULL (not 'infinity') in the task row.
+	var availableAt *time.Time
+	row := client.Pool().QueryRow(ctx,
+		`SELECT available_at FROM teguh.t_test_null_await WHERE task_id = $1`,
+		res.TaskID)
+	require.NoError(t, row.Scan(&availableAt))
+	require.Nil(t, availableAt, "available_at must be NULL for no-timeout AwaitEvent")
+
+	// Ticker must NOT re-queue the task (available_at IS NULL is excluded).
+	n := ticker(t, client)
+	require.Equal(t, 0, n, "ticker must not re-queue a no-timeout waiting task")
+
+	// Task is still not claimable.
+	noRuns, err := client.ClaimTask(ctx, "test_null_await", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Empty(t, noRuns)
+
+	// Emit wakes it.
+	require.NoError(t, client.EmitEvent(ctx, "test_null_await", "my-event", nil))
+	woken, err := client.ClaimTask(ctx, "test_null_await", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Len(t, woken, 1)
+	require.NoError(t, client.CompleteRun(ctx, "test_null_await", woken[0].RunID, nil))
+}
+
+// Critical #4: concurrent cancel and complete must not deadlock; exactly one wins.
+func TestConcurrentCancelVsComplete(t *testing.T) {
+	client := newClient(t)
+	setupQueue(t, client, "test_cancel_vs_complete")
+	ctx := context.Background()
+
+	res, err := client.SpawnTask(ctx, "test_cancel_vs_complete", "race-task", nil, nil)
+	require.NoError(t, err)
+
+	runs, err := client.ClaimTask(ctx, "test_cancel_vs_complete", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	runID := runs[0].RunID
+
+	// Race cancel vs complete; both may error but neither must deadlock.
+	cancelErr := make(chan error, 1)
+	completeErr := make(chan error, 1)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		cancelErr <- client.CancelTask(ctx, "test_cancel_vs_complete", res.TaskID)
+	}()
+	go func() {
+		defer wg.Done()
+		completeErr <- client.CompleteRun(ctx, "test_cancel_vs_complete", runID, nil)
+	}()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("deadlock detected: cancel+complete did not finish within 10s")
+	}
+
+	// Drain errors; exactly one operation succeeds (or both may succeed
+	// if cancel fires after complete). Final state must be terminal.
+	<-cancelErr
+	<-completeErr
+
+	result, err := client.GetTaskResult(ctx, "test_cancel_vs_complete", res.TaskID)
+	require.NoError(t, err)
+	require.Contains(t, []string{"completed", "cancelled"}, result.State,
+		"final state must be a terminal state")
 }

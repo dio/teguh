@@ -146,9 +146,11 @@ func (w *Worker) executeRun(ctx context.Context, run Run) {
 	cps, err := w.client.GetCheckpoints(ctx, w.queue, run.TaskID, run.RunID)
 	if err != nil {
 		log.ErrorContext(ctx, "teguh: get_checkpoints failed", "error", err)
-		_ = w.client.FailRun(ctx, w.queue, run.RunID,
+		failCtx, failCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = w.client.FailRun(failCtx, w.queue, run.RunID,
 			map[string]any{"name": "$InternalError", "message": err.Error()},
 			nil)
+		failCancel()
 		return
 	}
 
@@ -170,9 +172,11 @@ func (w *Worker) executeRun(ctx context.Context, run Run) {
 	}
 	if handler == nil {
 		log.WarnContext(ctx, "teguh: no handler registered", "task_name", run.TaskName)
-		_ = w.client.FailRun(ctx, w.queue, run.RunID,
+		failCtx, failCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = w.client.FailRun(failCtx, w.queue, run.RunID,
 			map[string]any{"name": "$NoHandler", "message": "no handler for task " + run.TaskName},
 			nil)
+		failCancel()
 		return
 	}
 
@@ -186,9 +190,14 @@ func (w *Worker) executeRun(ctx context.Context, run Run) {
 	// a claim that is about to be released.
 	stopHB()
 
+	// Use a fresh context for terminal DB calls so they complete even when
+	// the parent ctx was cancelled during graceful shutdown.
+	termCtx, termCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer termCancel()
+
 	switch {
 	case herr == nil:
-		if err := w.client.CompleteRun(ctx, w.queue, run.RunID, nil); err != nil {
+		if err := w.client.CompleteRun(termCtx, w.queue, run.RunID, nil); err != nil {
 			log.ErrorContext(ctx, "teguh: complete_run failed", "error", err)
 		} else {
 			log.InfoContext(ctx, "teguh: run completed")
@@ -204,7 +213,7 @@ func (w *Worker) executeRun(ctx context.Context, run Run) {
 
 	default:
 		log.ErrorContext(ctx, "teguh: handler error", "error", herr)
-		if err := w.client.FailRun(ctx, w.queue, run.RunID,
+		if err := w.client.FailRun(termCtx, w.queue, run.RunID,
 			map[string]any{"name": "$HandlerError", "message": herr.Error()},
 			nil,
 		); err != nil {

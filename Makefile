@@ -1,7 +1,7 @@
 SHELL        := bash
 .SHELLFLAGS  := -Eeuo pipefail -c
 
-MODULES := . ./e2e ./tools
+MODULES := . ./e2e
 
 TEGUH_SQL     := sql/teguh.sql
 TEGUH_SQL_DST := e2e/testdata/teguh.sql
