@@ -1009,3 +1009,90 @@ func TestConcurrentCancelVsComplete(t *testing.T) {
 	require.Contains(t, []string{"completed", "cancelled"}, result.State,
 		"final state must be a terminal state")
 }
+
+// Critical #11: emit_event must not re-queue a task that was cancelled while waiting.
+func TestCancelledTaskNotRequeueOnEmit(t *testing.T) {
+	client := newClient(t)
+	setupQueue(t, client, "test_cancel_emit")
+	ctx := context.Background()
+
+	res, err := client.SpawnTask(ctx, "test_cancel_emit", "waiter", nil, nil)
+	require.NoError(t, err)
+
+	runs, err := client.ClaimTask(ctx, "test_cancel_emit", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+
+	// Suspend waiting for event.
+	shouldSuspend, _, err := client.AwaitEvent(
+		ctx, "test_cancel_emit", runs[0].TaskID, runs[0].RunID,
+		"wait-step", "payment.received", nil,
+	)
+	require.NoError(t, err)
+	require.True(t, shouldSuspend)
+
+	// Cancel the task while it is sleeping.
+	require.NoError(t, client.CancelTask(ctx, "test_cancel_emit", res.TaskID))
+
+	// Emitting the event must not re-queue the cancelled task.
+	require.NoError(t, client.EmitEvent(ctx, "test_cancel_emit", "payment.received",
+		map[string]any{"amount": 100}))
+
+	// Task must remain cancelled, not re-queued.
+	noRuns, err := client.ClaimTask(ctx, "test_cancel_emit", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Empty(t, noRuns, "cancelled task must not be claimable after emit_event")
+
+	result, err := client.GetTaskResult(ctx, "test_cancel_emit", res.TaskID)
+	require.NoError(t, err)
+	require.Equal(t, "cancelled", result.State)
+}
+
+// Issue #20: handler panics must be recovered and result in a failed run.
+func TestWorkerHandlerPanic(t *testing.T) {
+	client := newClient(t)
+	setupQueue(t, client, "test_panic")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	maxAttempts := 2
+	res, err := client.SpawnTask(ctx, "test_panic", "crasher", nil,
+		&teguh.SpawnOptions{MaxAttempts: &maxAttempts})
+	require.NoError(t, err)
+
+	var attempt int32
+	done := make(chan struct{})
+
+	w := client.NewWorker("test_panic",
+		teguh.WithPollInterval(100*time.Millisecond),
+		teguh.WithWorkerID("panic-worker"),
+	)
+	w.Handle("crasher", func(_ context.Context, tc *teguh.TaskContext) error {
+		n := int(atomic.AddInt32(&attempt, 1))
+		if n == 1 {
+			panic("simulated handler crash")
+		}
+		// Second attempt: succeed.
+		close(done)
+		return nil
+	})
+
+	workerErr := make(chan error, 1)
+	go func() { workerErr <- w.Start(ctx) }()
+	t.Cleanup(func() {
+		if err := <-workerErr; err != nil &&
+			!errors.Is(err, context.Canceled) &&
+			!errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("worker Start: %v", err)
+		}
+	})
+
+	select {
+	case <-done:
+		result, err := client.GetTaskResult(ctx, "test_panic", res.TaskID)
+		require.NoError(t, err)
+		require.Equal(t, "completed", result.State)
+	case <-ctx.Done():
+		require.Fail(t, "timeout waiting for panic recovery and retry")
+	}
+}
