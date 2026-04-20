@@ -40,7 +40,7 @@ func WithBatchSize(n int) Option {
 }
 
 // WithWorkerID sets an explicit worker identifier (used in lease metadata and
-// logs). Defaults to the hostname + a random suffix.
+// logs). Defaults to hostname:pid.
 func WithWorkerID(id string) Option {
 	return func(w *Worker) { w.workerID = id }
 }

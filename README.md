@@ -154,7 +154,7 @@ runs, err := client.ClaimTask(ctx, "jobs", "worker-1", 30, 1)
 
 // Complete, fail, or sleep.
 client.CompleteRun(ctx, "jobs", runs[0].RunID, result)
-client.FailRun(ctx, "jobs", runs[0].RunID, reason, time.Time{})
+client.FailRun(ctx, "jobs", runs[0].RunID, reason, nil)
 client.ScheduleRun(ctx, "jobs", runs[0].RunID, time.Now().Add(1*time.Minute))
 
 // Checkpoints.

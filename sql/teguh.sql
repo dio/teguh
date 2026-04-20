@@ -278,6 +278,16 @@ begin
     'e_' || p_queue_name || '_eai',
     'e_' || p_queue_name
   );
+
+  -- Partial index for cancellation policy scan in claim_task.
+  -- Only tasks with a cancellation policy need this scan.
+  execute format(
+    'create index if not exists %I on teguh.%I (enqueue_at, first_started_at)
+       where cancellation is not null
+         and state in (''pending'',''sleeping'',''running'')',
+    't_' || p_queue_name || '_cani',
+    't_' || p_queue_name
+  );
 end;
 $$;
 
@@ -944,12 +954,13 @@ begin
     raise exception 'step_name must be provided';
   end if;
 
-  -- Verify run is still active and get attempt number
+  -- Verify run is still active and lock both rows to prevent concurrent cancellation.
   execute format(
     'select r.attempt, t.state
        from teguh.%I r
        join teguh.%I t on t.task_id = r.task_id
-      where r.run_id = $1',
+      where r.run_id = $1
+      for update',
     'r_' || p_queue_name,
     't_' || p_queue_name
   )
@@ -1101,7 +1112,9 @@ begin
   into v_attempt
   using p_run_id;
 
-  v_attempt := coalesce(v_attempt, 2147483647);
+  if v_attempt is null then
+    raise exception 'run "%" not found in queue "%"', p_run_id, p_queue_name;
+  end if;
 
   return query execute format(
     'select c.checkpoint_name, c.state
@@ -1335,14 +1348,40 @@ begin
     return;  -- already emitted; nothing to do
   end if;
 
-  -- Wake sleeping tasks waiting on this event
+  -- Wake sleeping tasks waiting on this event.
+  -- Also re-queue tasks whose event wait timed out before the event was emitted.
   execute format(
     'with expired_waits as (
          delete from teguh.%1$I w
           where w.event_name = $1
             and w.timeout_at is not null
             and w.timeout_at <= $2
-          returning w.run_id
+          returning w.task_id, w.run_id, w.step_name
+     ),
+     expired_cp as (
+         insert into teguh.%3$I
+             (task_id, checkpoint_name, state, status, owner_run_id, updated_at)
+         select e.task_id, e.step_name, ''null''::jsonb, ''committed'', e.run_id, $2
+           from expired_waits e
+          on conflict (task_id, checkpoint_name) do nothing
+     ),
+     expired_task_upd as (
+         update teguh.%4$I t
+            set state        = ''pending'',
+                available_at = null,
+                wake_event   = null
+          where t.task_id in (select task_id from expired_waits)
+            and t.state = ''sleeping''
+     ),
+     expired_pending as (
+         insert into teguh.%2$I (task_id, attempt, available_at)
+         select t.task_id, t.attempts + 1, $2
+           from expired_waits ew
+           join teguh.%4$I t on t.task_id = ew.task_id
+          where not exists (
+            select 1 from teguh.%5$I r where r.task_id = t.task_id
+          )
+         on conflict (task_id) do nothing
      ),
      active_waiters as (
          select w.run_id, w.task_id, w.step_name
@@ -1383,7 +1422,8 @@ begin
     'w_' || p_queue_name,
     'p_' || p_queue_name,
     'c_' || p_queue_name,
-    't_' || p_queue_name
+    't_' || p_queue_name,
+    'r_' || p_queue_name
   ) using p_event_name, v_now, v_payload;
 
   get diagnostics v_woke_any = row_count;
@@ -1669,12 +1709,16 @@ begin
        select t.task_id, t.attempts + 1, $1
          from expired e
          join teguh.%I t on t.task_id = e.task_id
+        where not exists (
+          select 1 from teguh.%I r where r.task_id = t.task_id
+        )
         on conflict (task_id) do nothing',
       'w_' || v_queue.queue_name,
       't_' || v_queue.queue_name,
       'c_' || v_queue.queue_name,
       'p_' || v_queue.queue_name,
-      't_' || v_queue.queue_name
+      't_' || v_queue.queue_name,
+      'r_' || v_queue.queue_name
     )
     using v_now;
 
@@ -1721,15 +1765,19 @@ begin
 
   execute format(
     'with to_delete as (
-         select task_id from teguh.%I
+         select task_id from teguh.%1$I
           where state in (''completed'',''failed'',''cancelled'')
             and enqueue_at < $1
           limit $2
+     ),
+     del_ckpts as (
+         delete from teguh.%2$I
+          where task_id in (select task_id from to_delete)
      )
-     delete from teguh.%I
+     delete from teguh.%1$I
       where task_id in (select task_id from to_delete)',
     't_' || p_queue_name,
-    't_' || p_queue_name
+    'c_' || p_queue_name
   )
   using v_cutoff, v_limit;
 

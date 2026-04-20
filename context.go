@@ -15,6 +15,10 @@ import (
 // error up to the Worker without further processing.
 var ErrSuspended = errors.New("teguh: task suspended")
 
+// ErrCancelled is returned by Heartbeat when the task has been cancelled by
+// an external actor. Handlers must propagate this error up to the Worker.
+var ErrCancelled = errors.New("teguh: task cancelled")
+
 // TaskContext is passed to every task handler. It provides durable execution
 // primitives: exactly-once steps, timer-based sleep, and event coordination.
 //
@@ -88,11 +92,11 @@ func Step[T any](ctx context.Context, tc *TaskContext, name string, fn func(cont
 }
 
 // Heartbeat extends the run's lease by the worker's claim timeout. Returns
-// ErrSuspended if the task has been cancelled (workers should stop immediately).
+// ErrCancelled if the task has been cancelled (workers should stop immediately).
 func (tc *TaskContext) Heartbeat(ctx context.Context, extendBySecs int) error {
 	if err := tc.client.ExtendClaim(ctx, tc.queue, tc.run.RunID, extendBySecs); err != nil {
 		if isCancelledError(err) {
-			return ErrSuspended
+			return ErrCancelled
 		}
 		return err
 	}

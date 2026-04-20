@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -20,6 +21,8 @@ import (
 //   - Return nil to mark the run as completed.
 //   - Return ErrSuspended (propagated from tc.SleepFor / tc.AwaitEvent) to
 //     leave the run suspended, the Worker will not call complete_run or fail_run.
+//   - Return ErrCancelled (propagated from tc.Heartbeat) when the task has been
+//     cancelled; the Worker will not call complete_run or fail_run.
 //   - Return any other error to fail the run (with retry if configured).
 type HandlerFunc func(ctx context.Context, tc *TaskContext) error
 
@@ -71,15 +74,14 @@ func (w *Worker) Start(ctx context.Context) error {
 		"poll_interval", w.pollInterval,
 	)
 
-	// sem tracks in-flight runs. Capacity = concurrency.
+	// sem limits in-flight runs to w.concurrency.
 	sem := make(chan struct{}, w.concurrency)
+	var wg sync.WaitGroup
 
 	for {
 		if err := ctx.Err(); err != nil {
-			// Drain semaphore to wait for in-flight runs before returning.
-			for i := 0; i < w.concurrency; i++ {
-				sem <- struct{}{}
-			}
+			// Wait for all in-flight runs to finish before returning.
+			wg.Wait()
 			return err
 		}
 
@@ -118,7 +120,9 @@ func (w *Worker) Start(ctx context.Context) error {
 
 		for _, run := range runs {
 			sem <- struct{}{}
+			wg.Add(1)
 			go func(r Run) {
+				defer wg.Done()
 				defer func() { <-sem }()
 				w.executeRun(ctx, r)
 			}(run)
@@ -144,7 +148,7 @@ func (w *Worker) executeRun(ctx context.Context, run Run) {
 		log.ErrorContext(ctx, "teguh: get_checkpoints failed", "error", err)
 		_ = w.client.FailRun(ctx, w.queue, run.RunID,
 			map[string]any{"name": "$InternalError", "message": err.Error()},
-			time.Time{})
+			nil)
 		return
 	}
 
@@ -160,10 +164,6 @@ func (w *Worker) executeRun(ctx context.Context, run Run) {
 		checkpoints: cache,
 	}
 
-	// Background heartbeat: keep the lease alive while the run executes.
-	stopHB := w.startHeartbeat(ctx, run, log)
-	defer stopHB()
-
 	handler := w.handlers[run.TaskName]
 	if handler == nil {
 		handler = w.catchAll
@@ -172,11 +172,19 @@ func (w *Worker) executeRun(ctx context.Context, run Run) {
 		log.WarnContext(ctx, "teguh: no handler registered", "task_name", run.TaskName)
 		_ = w.client.FailRun(ctx, w.queue, run.RunID,
 			map[string]any{"name": "$NoHandler", "message": "no handler for task " + run.TaskName},
-			time.Time{})
+			nil)
 		return
 	}
 
+	// Background heartbeat: keep the lease alive while the run executes.
+	stopHB := w.startHeartbeat(ctx, run, log)
+	defer stopHB() // safety net for early returns via panic
+
 	herr := handler(ctx, tc)
+
+	// Stop heartbeat before any state-changing DB call to avoid extending
+	// a claim that is about to be released.
+	stopHB()
 
 	switch {
 	case herr == nil:
@@ -190,11 +198,15 @@ func (w *Worker) executeRun(ctx context.Context, run Run) {
 		// Task is sleeping or waiting for an event, leave it alone.
 		log.InfoContext(ctx, "teguh: run suspended")
 
+	case errors.Is(herr, ErrCancelled):
+		// Task was cancelled by an external actor during execution.
+		log.InfoContext(ctx, "teguh: task cancelled during execution")
+
 	default:
 		log.ErrorContext(ctx, "teguh: handler error", "error", herr)
 		if err := w.client.FailRun(ctx, w.queue, run.RunID,
 			map[string]any{"name": "$HandlerError", "message": herr.Error()},
-			time.Time{},
+			nil,
 		); err != nil {
 			log.ErrorContext(ctx, "teguh: fail_run error", "error", err)
 		}
@@ -202,9 +214,11 @@ func (w *Worker) executeRun(ctx context.Context, run Run) {
 }
 
 // startHeartbeat launches a background goroutine that periodically extends the
-// run's lease. The returned stop function must be deferred by the caller.
+// run's lease. The returned stop function is safe to call multiple times.
 func (w *Worker) startHeartbeat(ctx context.Context, run Run, log *slog.Logger) func() {
 	stop := make(chan struct{})
+	var once sync.Once
+	stopFn := func() { once.Do(func() { close(stop) }) }
 	go func() {
 		t := time.NewTicker(w.heartbeatInterval)
 		defer t.Stop()
@@ -225,7 +239,7 @@ func (w *Worker) startHeartbeat(ctx context.Context, run Run, log *slog.Logger) 
 			}
 		}
 	}()
-	return func() { close(stop) }
+	return stopFn
 }
 
 // defaultWorkerID returns "hostname:pid" or "worker" on error.

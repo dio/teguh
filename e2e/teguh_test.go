@@ -5,6 +5,7 @@ package e2e_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -135,7 +136,7 @@ func TestRetryOnFail(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
 	require.NoError(t, client.FailRun(ctx, "test_retry", runs[0].RunID,
-		map[string]any{"message": "attempt 1 failure"}, time.Time{}))
+		map[string]any{"message": "attempt 1 failure"}, nil))
 
 	// Attempt 2: fail
 	runs, err = client.ClaimTask(ctx, "test_retry", "w1", 30, 1)
@@ -143,7 +144,7 @@ func TestRetryOnFail(t *testing.T) {
 	require.Len(t, runs, 1)
 	require.Equal(t, 2, runs[0].Attempt)
 	require.NoError(t, client.FailRun(ctx, "test_retry", runs[0].RunID,
-		map[string]any{"message": "attempt 2 failure"}, time.Time{}))
+		map[string]any{"message": "attempt 2 failure"}, nil))
 
 	// Attempt 3: succeed
 	runs, err = client.ClaimTask(ctx, "test_retry", "w1", 30, 1)
@@ -175,7 +176,7 @@ func TestExhaustedRetries(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, runs, 1)
 		require.NoError(t, client.FailRun(ctx, "test_exhaust", runs[0].RunID,
-			map[string]any{"attempt": i}, time.Time{}))
+			map[string]any{"attempt": i}, nil))
 	}
 
 	result, err := client.GetTaskResult(ctx, "test_exhaust", res.TaskID)
@@ -209,7 +210,7 @@ func TestStepCheckpointExactlyOnce(t *testing.T) {
 	require.NoError(t, client.SetCheckpoint(ctx, "test_steps", runs[0].TaskID, "step-A",
 		stepStateJSON, runs[0].RunID, 0))
 	require.NoError(t, client.FailRun(ctx, "test_steps", runs[0].RunID,
-		map[string]any{"message": "crash after step-A"}, time.Time{}))
+		map[string]any{"message": "crash after step-A"}, nil))
 
 	// Attempt 2: load checkpoints, step-A should be cached.
 	runs, err = client.ClaimTask(ctx, "test_steps", "w1", 30, 1)
@@ -257,7 +258,7 @@ func TestSleepAndResume(t *testing.T) {
 	require.Empty(t, immediateRuns, "task must not be claimable before wake time")
 
 	// Wait past wake time, then ticker re-queues it.
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	n := ticker(t, client)
 	require.GreaterOrEqual(t, n, 1, "ticker must re-queue at least the sleeping task")
 
@@ -394,7 +395,7 @@ func TestManualRetry(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
 	require.NoError(t, client.FailRun(ctx, "test_manual_retry", runs[0].RunID,
-		map[string]any{"msg": "terminal"}, time.Time{}))
+		map[string]any{"msg": "terminal"}, nil))
 
 	result, err := client.GetTaskResult(ctx, "test_manual_retry", res.TaskID)
 	require.NoError(t, err)
@@ -433,7 +434,15 @@ func TestWorkerBasicDispatch(t *testing.T) {
 		done <- fmt.Sprintf("hello %v", params["name"])
 		return nil
 	})
-	go w.Start(ctx) //nolint:errcheck
+	workerErr := make(chan error, 1)
+	go func() { workerErr <- w.Start(ctx) }()
+	t.Cleanup(func() {
+		if err := <-workerErr; err != nil &&
+			!errors.Is(err, context.Canceled) &&
+			!errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("worker Start: %v", err)
+		}
+	})
 
 	_, err := client.SpawnTask(ctx, "test_worker_basic", "greet",
 		map[string]any{"name": "world"}, nil)
@@ -469,7 +478,15 @@ func TestWorkerConcurrency(t *testing.T) {
 		}
 		return nil
 	})
-	go w.Start(ctx) //nolint:errcheck
+	workerErr := make(chan error, 1)
+	go func() { workerErr <- w.Start(ctx) }()
+	t.Cleanup(func() {
+		if err := <-workerErr; err != nil &&
+			!errors.Is(err, context.Canceled) &&
+			!errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("worker Start: %v", err)
+		}
+	})
 
 	for i := 0; i < numTasks; i++ {
 		_, err := client.SpawnTask(ctx, "test_worker_conc", "work",
@@ -499,7 +516,15 @@ func TestWorkerCatchAll(t *testing.T) {
 		received <- string(tc.Params())
 		return nil
 	})
-	go w.Start(ctx) //nolint:errcheck
+	workerErr := make(chan error, 1)
+	go func() { workerErr <- w.Start(ctx) }()
+	t.Cleanup(func() {
+		if err := <-workerErr; err != nil &&
+			!errors.Is(err, context.Canceled) &&
+			!errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("worker Start: %v", err)
+		}
+	})
 
 	_, err := client.SpawnTask(ctx, "test_worker_catchall", "unknown-type",
 		map[string]any{"key": "val"}, nil)
@@ -555,7 +580,7 @@ func TestDurableMultiStep(t *testing.T) {
 
 	// Crash before ship-order.
 	require.NoError(t, client.FailRun(ctx, "test_durable", runs[0].RunID,
-		map[string]any{"message": "crash before ship"}, time.Time{}))
+		map[string]any{"message": "crash before ship"}, nil))
 
 	// ── Attempt 2: checkpoints for fetch+charge must be loaded ──
 	runs, err = client.ClaimTask(ctx, "test_durable", "w1", 30, 1)
@@ -624,12 +649,24 @@ func TestWorkerSleepResume(t *testing.T) {
 		return nil
 	})
 
-	go w.Start(ctx) //nolint:errcheck
+	workerErr := make(chan error, 1)
+	go func() { workerErr <- w.Start(ctx) }()
+	t.Cleanup(func() {
+		if err := <-workerErr; err != nil &&
+			!errors.Is(err, context.Canceled) &&
+			!errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("worker Start: %v", err)
+		}
+	})
 
 	// Seed the ticker goroutine: periodically call Ticker so sleeping tasks wake.
+	// Use a dedicated stop channel so the goroutine exits as soon as the test ends.
+	tickerStop := make(chan struct{})
 	go func() {
 		for {
 			select {
+			case <-tickerStop:
+				return
 			case <-ctx.Done():
 				return
 			case <-time.After(50 * time.Millisecond):
@@ -643,8 +680,10 @@ func TestWorkerSleepResume(t *testing.T) {
 
 	select {
 	case <-done:
+		close(tickerStop)
 		require.Equal(t, int32(1), atomic.LoadInt32(&completions))
 	case <-ctx.Done():
+		close(tickerStop)
 		require.Fail(t, "timeout waiting for sleep+resume cycle")
 	}
 }

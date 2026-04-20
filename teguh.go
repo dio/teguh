@@ -158,20 +158,16 @@ func (c *Client) CompleteRun(ctx context.Context, queue, runID string, result an
 }
 
 // FailRun marks the run as failed with a JSON reason payload. The engine will
-// schedule a retry according to the task's retry_strategy. retryAt overrides
-// the computed retry delay when non-zero.
-func (c *Client) FailRun(ctx context.Context, queue, runID string, reason any, retryAt time.Time) error {
+// schedule a retry according to the task's retry_strategy. retryAt, when
+// non-nil, overrides the computed retry delay.
+func (c *Client) FailRun(ctx context.Context, queue, runID string, reason any, retryAt *time.Time) error {
 	reasonJSON, err := json.Marshal(reason)
 	if err != nil {
 		return fmt.Errorf("teguh: marshal reason: %w", err)
 	}
-	var retryAtPtr *time.Time
-	if !retryAt.IsZero() {
-		retryAtPtr = &retryAt
-	}
 	if _, err := c.pool.Exec(ctx,
 		`SELECT teguh.fail_run($1,$2,$3::jsonb,$4)`,
-		queue, runID, string(reasonJSON), retryAtPtr,
+		queue, runID, string(reasonJSON), retryAt,
 	); err != nil {
 		return fmt.Errorf("teguh: fail_run: %w", err)
 	}
@@ -270,14 +266,20 @@ func (c *Client) AwaitEvent(ctx context.Context, queue, taskID, runID, stepName,
 // EmitEvent emits a named event with an optional payload. First-write-wins:
 // subsequent calls for the same event name are silently ignored.
 // Wakes any tasks waiting on this event and fires pg_notify.
+// A nil payload sends SQL NULL, which the engine stores as JSON null.
 func (c *Client) EmitEvent(ctx context.Context, queue, eventName string, payload any) error {
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("teguh: marshal event payload: %w", err)
+	var payloadArg any
+	if payload != nil {
+		payloadJSON, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("teguh: marshal event payload: %w", err)
+		}
+		s := string(payloadJSON)
+		payloadArg = &s
 	}
 	if _, err := c.pool.Exec(ctx,
 		`SELECT teguh.emit_event($1,$2,$3::jsonb)`,
-		queue, eventName, string(payloadJSON),
+		queue, eventName, payloadArg,
 	); err != nil {
 		return fmt.Errorf("teguh: emit_event %q: %w", eventName, err)
 	}
