@@ -16,7 +16,7 @@ import (
 	teguh "github.com/dio/teguh"
 )
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// helpers
 
 func newClient(t *testing.T) *teguh.Client {
 	t.Helper()
@@ -44,7 +44,7 @@ func ticker(t *testing.T, client *teguh.Client) int {
 	return n
 }
 
-// ── basic lifecycle ───────────────────────────────────────────────────────────
+// basic lifecycle
 
 func TestSpawnTask(t *testing.T) {
 	client := newClient(t)
@@ -96,7 +96,7 @@ func TestClaimEmptyQueue(t *testing.T) {
 	require.Empty(t, runs)
 }
 
-// ── idempotency ───────────────────────────────────────────────────────────────
+// idempotency
 
 func TestIdempotencyKey(t *testing.T) {
 	client := newClient(t)
@@ -114,7 +114,7 @@ func TestIdempotencyKey(t *testing.T) {
 	require.Equal(t, r1.TaskID, r2.TaskID)
 }
 
-// ── retry ─────────────────────────────────────────────────────────────────────
+// retry
 
 func TestRetryOnFail(t *testing.T) {
 	client := newClient(t)
@@ -184,7 +184,7 @@ func TestExhaustedRetries(t *testing.T) {
 	require.Equal(t, "failed", result.State)
 }
 
-// ── step checkpoints ──────────────────────────────────────────────────────────
+// step checkpoints
 
 func TestStepCheckpointExactlyOnce(t *testing.T) {
 	client := newClient(t)
@@ -234,7 +234,7 @@ func TestStepCheckpointExactlyOnce(t *testing.T) {
 	require.Equal(t, "completed", result.State)
 }
 
-// ── sleep / resume ────────────────────────────────────────────────────────────
+// sleep and resume
 
 func TestSleepAndResume(t *testing.T) {
 	client := newClient(t)
@@ -271,7 +271,7 @@ func TestSleepAndResume(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_sleep", runs2[0].RunID, nil))
 }
 
-// ── events ────────────────────────────────────────────────────────────────────
+// events
 
 func TestAwaitAndEmitEvent(t *testing.T) {
 	client := newClient(t)
@@ -356,7 +356,7 @@ func TestEmitBeforeAwait(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_early_emit", runs[0].RunID, nil))
 }
 
-// ── cancellation ─────────────────────────────────────────────────────────────
+// cancellation
 
 func TestCancelPendingTask(t *testing.T) {
 	client := newClient(t)
@@ -378,7 +378,7 @@ func TestCancelPendingTask(t *testing.T) {
 	require.Equal(t, "cancelled", result.State)
 }
 
-// ── manual retry ──────────────────────────────────────────────────────────────
+// manual retry
 
 func TestManualRetry(t *testing.T) {
 	client := newClient(t)
@@ -412,7 +412,7 @@ func TestManualRetry(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_manual_retry", runs2[0].RunID, nil))
 }
 
-// ── Worker high-level API ─────────────────────────────────────────────────────
+// Worker high-level API
 
 func TestWorkerBasicDispatch(t *testing.T) {
 	client := newClient(t)
@@ -538,7 +538,7 @@ func TestWorkerCatchAll(t *testing.T) {
 	}
 }
 
-// ── durable execution: multi-step workflow ────────────────────────────────────
+// durable execution multi-step workflow
 
 // TestDurableMultiStep simulates the "order fulfillment" workflow:
 //
@@ -620,12 +620,12 @@ func TestDurableMultiStep(t *testing.T) {
 	require.Equal(t, "completed", result.State)
 }
 
-// ── Worker + Step + SleepFor end-to-end ──────────────────────────────────────
+// Worker Step and SleepFor end-to-end
 
 // TestWorkerSleepResume uses the Worker's high-level API to test that a
 // handler can call tc.SleepFor, the task suspends, the ticker re-queues it,
 // and the worker picks it up and completes it on the second execution.
-// ── event-wait timeout ────────────────────────────────────────────────────────
+// event-wait timeout
 
 // TestAwaitEventTimeout verifies that a task suspended waiting for an event
 // with a timeout is re-queued when the timeout expires, and that the second
@@ -684,7 +684,7 @@ func TestAwaitEventTimeout(t *testing.T) {
 	require.Equal(t, "completed", result.State)
 }
 
-// ── claim_task inline recovery sweep ─────────────────────────────────────────
+// claim_task inline recovery sweep
 
 // TestClaimTaskInlineRecovery verifies that claim_task's inline recovery sweep
 // re-queues sleeping tasks whose wake time has arrived even when ticker has not
@@ -722,7 +722,7 @@ func TestClaimTaskInlineRecovery(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_inline_recovery", resumed[0].RunID, nil))
 }
 
-// ── delayed spawn (available_at) ──────────────────────────────────────────────
+// delayed spawn available_at
 
 // TestAvailableAt verifies that a task spawned with a future available_at is
 // not claimable before that time but becomes claimable after.
@@ -752,7 +752,7 @@ func TestAvailableAt(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_available_at", runs[0].RunID, nil))
 }
 
-// ── RetryTask spawn_new ───────────────────────────────────────────────────────
+// RetryTask spawn_new
 
 // TestRetryTaskSpawnNew verifies that RetryTask with spawn_new=true creates a
 // new task (new task_id) while leaving the original in its terminal state.
@@ -794,7 +794,7 @@ func TestRetryTaskSpawnNew(t *testing.T) {
 	require.Equal(t, "failed", orig2.State)
 }
 
-// ── Worker + AwaitEvent end-to-end ────────────────────────────────────────────
+// Worker AwaitEvent end-to-end
 
 // TestWorkerAwaitEvent uses the Worker's high-level API to test that a handler
 // can call tc.AwaitEvent, the task suspends, emit_event wakes it, and the
