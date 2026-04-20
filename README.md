@@ -14,13 +14,57 @@ Teguh is a durable execution engine built on PostgreSQL. It combines the workflo
 - Configurable retry strategies: fixed delay, exponential backoff, or none.
 - Task cancellation, manual retry, and result inspection.
 - Optional pg_cron integration via `teguh.start()` and `teguh.stop()`, gracefully skipped when pg_cron is absent.
-- Single-file SQL install, no external dependencies beyond PostgreSQL and pgcrypto.
+- Single-file SQL install, no external dependencies beyond PostgreSQL itself.
 
 ## Requirements
 
 - PostgreSQL 14 or later.
-- The `pgcrypto` extension (used for `gen_random_bytes` in the UUIDv7 generator).
 - Go 1.21 or later (for generic `Step[T]`).
+
+No PostgreSQL extensions are required. The UUIDv7 generator uses `gen_random_uuid()` and
+`uuid_send()`, both core built-ins since PostgreSQL 13.
+
+## Managed PostgreSQL compatibility
+
+Teguh works out of the box on every major managed provider. No extension pre-configuration is needed.
+
+| Provider | Works? | Notes |
+|---|---|---|
+| Google Cloud SQL | ✅ | No restrictions |
+| Amazon RDS for PostgreSQL | ✅ | No restrictions |
+| Amazon Aurora PostgreSQL | ✅ | No restrictions |
+| Azure Database for PostgreSQL | ✅ | No restrictions |
+| Supabase | ✅ | No restrictions |
+| Neon | ✅ | No restrictions |
+| Aiven | ✅ | No restrictions |
+| Crunchy Bridge | ✅ | No restrictions |
+| DigitalOcean Managed Databases | ✅ | No restrictions |
+| Render | ✅ | No restrictions |
+| Heroku Postgres / EDB | ✅ | No restrictions |
+| Railway | ✅ | No official extension list, but no extension needed |
+
+### Why no pgcrypto?
+
+Earlier versions required `pgcrypto` for `gen_random_bytes()` inside the UUIDv7 generator.
+This was dropped: `portable_uuidv7()` now uses `uuid_send(gen_random_uuid())` to obtain
+10 random bytes from the cryptographically secure `gen_random_uuid()` built-in (available
+since PostgreSQL 13 with no extension).
+
+**Trade-offs of the current approach vs pgcrypto:**
+
+| | `uuid_send(gen_random_uuid())` (current) | `gen_random_bytes(10)` (pgcrypto) |
+|---|---|---|
+| Extension required | None | `pgcrypto` |
+| Azure extra step | None | Must allowlist via `azure.extensions` param |
+| Random source | OS CSPRNG via `gen_random_uuid()` | OS CSPRNG directly |
+| Bytes of entropy | 80 bits (first 10 of 16) | 80 bits |
+| Performance | One UUID generation + substr | One syscall |
+| Portability | All providers, all PG14+ | All providers except possibly Railway |
+
+Both approaches provide 80 bits of random data from the operating system's CSPRNG.
+The only material difference is that the current approach allocates a temporary UUID and
+discards 6 bytes, which is negligible. If you already have pgcrypto installed for other
+reasons (PGP encryption, password hashing, etc.), it coexists harmlessly.
 
 ## Installation
 

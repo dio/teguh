@@ -1,6 +1,11 @@
 -- teguh.sql -- Durable execution with zero-bloat queue
--- Requires: pgcrypto (for gen_random_bytes used in portable_uuidv7)
-create extension if not exists pgcrypto;
+--
+-- pgcrypto is no longer required. portable_uuidv7() uses uuid_send(gen_random_uuid())
+-- to obtain random bytes — a core built-in since PG13, available on all providers
+-- including Azure (which requires explicit allowlisting for pgcrypto) and Railway
+-- (which has no official extension support list).
+--
+-- If you have pgcrypto installed for other reasons, it coexists harmlessly.
 
 --
 -- Teguh combines absurd's durable execution API with pgque's dispatch
@@ -69,7 +74,10 @@ declare
 begin
   v_millis := (extract(epoch from teguh.current_time()) * 1000)::bigint;
   v_hex    := lpad(to_hex(v_millis), 12, '0');
-  v_b      := gen_random_bytes(10);
+  -- uuid_send() returns the 16-byte wire representation of the UUID.
+  -- gen_random_uuid() is a core CSPRNG built-in since PG13 (no extension needed),
+  -- so we use its first 10 bytes instead of pgcrypto's gen_random_bytes(10).
+  v_b      := substring(uuid_send(gen_random_uuid()), 1, 10);
   return (
     substring(v_hex, 1, 8) || '-' ||
     substring(v_hex, 9, 4) || '-' ||

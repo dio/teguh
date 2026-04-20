@@ -2,7 +2,7 @@
 
 // Package teguh is a Go client for Teguh, a durable execution engine built
 // on PostgreSQL that combines absurd's workflow API with a zero-bloat dispatch
-// queue inspired by PgQue/PgQ.
+// queue inspired by PgQue/PgQ. No PostgreSQL extensions are required.
 //
 // Quick start:
 //
