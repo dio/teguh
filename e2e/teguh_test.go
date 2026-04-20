@@ -30,7 +30,6 @@ func TestTeguhSuite(t *testing.T) {
 	suite.Run(t, new(TeguhSuite))
 }
 
-
 func newClient(t *testing.T) *teguh.Client {
 	t.Helper()
 	client, err := teguh.Connect(context.Background(), testDSN)
@@ -55,7 +54,6 @@ func ticker(t *testing.T, client *teguh.Client) int {
 	require.NoError(t, err, "ticker")
 	return n
 }
-
 
 func (s *TeguhSuite) TestSpawnTask() {
 	t := s.T()
@@ -110,7 +108,6 @@ func (s *TeguhSuite) TestClaimEmptyQueue() {
 	require.Empty(t, runs)
 }
 
-
 func (s *TeguhSuite) TestIdempotencyKey() {
 	t := s.T()
 	client := newClient(t)
@@ -127,7 +124,6 @@ func (s *TeguhSuite) TestIdempotencyKey() {
 	require.False(t, r2.Created)
 	require.Equal(t, r1.TaskID, r2.TaskID)
 }
-
 
 func (s *TeguhSuite) TestRetryOnFail() {
 	t := s.T()
@@ -199,7 +195,6 @@ func (s *TeguhSuite) TestExhaustedRetries() {
 	require.Equal(t, "failed", result.State)
 }
 
-
 func (s *TeguhSuite) TestStepCheckpointExactlyOnce() {
 	t := s.T()
 	client := newClient(t)
@@ -248,7 +243,6 @@ func (s *TeguhSuite) TestStepCheckpointExactlyOnce() {
 	require.Equal(t, "completed", result.State)
 }
 
-
 func (s *TeguhSuite) TestSleepAndResume() {
 	t := s.T()
 	client := newClient(t)
@@ -284,7 +278,6 @@ func (s *TeguhSuite) TestSleepAndResume() {
 
 	require.NoError(t, client.CompleteRun(ctx, "test_sleep", runs2[0].RunID, nil))
 }
-
 
 func (s *TeguhSuite) TestAwaitAndEmitEvent() {
 	t := s.T()
@@ -371,7 +364,6 @@ func (s *TeguhSuite) TestEmitBeforeAwait() {
 	require.NoError(t, client.CompleteRun(ctx, "test_early_emit", runs[0].RunID, nil))
 }
 
-
 func (s *TeguhSuite) TestCancelPendingTask() {
 	t := s.T()
 	client := newClient(t)
@@ -392,7 +384,6 @@ func (s *TeguhSuite) TestCancelPendingTask() {
 	require.NoError(t, err)
 	require.Equal(t, "cancelled", result.State)
 }
-
 
 func (s *TeguhSuite) TestManualRetry() {
 	t := s.T()
@@ -426,7 +417,6 @@ func (s *TeguhSuite) TestManualRetry() {
 	require.Len(t, runs2, 1)
 	require.NoError(t, client.CompleteRun(ctx, "test_manual_retry", runs2[0].RunID, nil))
 }
-
 
 func (s *TeguhSuite) TestWorkerBasicDispatch() {
 	t := s.T()
@@ -555,7 +545,6 @@ func (s *TeguhSuite) TestWorkerCatchAll() {
 	}
 }
 
-
 // TestDurableMultiStep simulates the "order fulfillment" workflow:
 //
 //  1. fetch-order   (step)
@@ -637,7 +626,6 @@ func (s *TeguhSuite) TestDurableMultiStep() {
 	require.Equal(t, "completed", result.State)
 }
 
-
 // TestAwaitEventTimeout verifies that a task suspended waiting for an event
 // with a timeout is re-queued when the timeout expires, and that the second
 // call to AwaitEvent returns nil payload (not a JSON null sentinel).
@@ -688,7 +676,6 @@ func (s *TeguhSuite) TestAwaitEventTimeout() {
 	require.Equal(t, "completed", result.State)
 }
 
-
 // TestClaimTaskInlineRecovery verifies that claim_task's inline recovery sweep
 // re-queues sleeping tasks whose wake time has arrived even when ticker has not
 // been called explicitly.
@@ -726,7 +713,6 @@ func (s *TeguhSuite) TestClaimTaskInlineRecovery() {
 	require.NoError(t, client.CompleteRun(ctx, "test_inline_recovery", resumed[0].RunID, nil))
 }
 
-
 // TestAvailableAt verifies that a task spawned with a future available_at is
 // not claimable before that time but becomes claimable after.
 func (s *TeguhSuite) TestAvailableAt() {
@@ -755,7 +741,6 @@ func (s *TeguhSuite) TestAvailableAt() {
 
 	require.NoError(t, client.CompleteRun(ctx, "test_available_at", runs[0].RunID, nil))
 }
-
 
 // TestRetryTaskSpawnNew verifies that RetryTask with spawn_new=true creates a
 // new task (new task_id) while leaving the original in its terminal state.
@@ -797,7 +782,6 @@ func (s *TeguhSuite) TestRetryTaskSpawnNew() {
 	require.NoError(t, err)
 	require.Equal(t, "failed", orig2.State)
 }
-
 
 // TestWorkerAwaitEvent uses the Worker's high-level API to test that a handler
 // can call tc.AwaitEvent, the task suspends, emit_event wakes it, and the
@@ -922,7 +906,6 @@ func (s *TeguhSuite) TestWorkerSleepResume() {
 	}
 }
 
-
 // TestAwaitEventNoTimeoutNullAvailableAt verifies that await_event stores
 // NULL available_at for no-timeout waits, so ticker never re-queues them.
 func (s *TeguhSuite) TestAwaitEventNoTimeoutNullAvailableAt() {
@@ -971,7 +954,6 @@ func (s *TeguhSuite) TestAwaitEventNoTimeoutNullAvailableAt() {
 	require.Len(t, woken, 1)
 	require.NoError(t, client.CompleteRun(ctx, "test_null_await", woken[0].RunID, nil))
 }
-
 
 // TestConcurrentCancelVsComplete races cancel against complete and verifies no
 // deadlock and that the final state is terminal.
@@ -1024,7 +1006,6 @@ func (s *TeguhSuite) TestConcurrentCancelVsComplete() {
 		"final state must be a terminal state")
 }
 
-
 // TestCancelledTaskNotRequeueOnEmit verifies that emit_event does not re-queue
 // a task that was cancelled while waiting for that event.
 func (s *TeguhSuite) TestCancelledTaskNotRequeueOnEmit() {
@@ -1064,7 +1045,6 @@ func (s *TeguhSuite) TestCancelledTaskNotRequeueOnEmit() {
 	require.NoError(t, err)
 	require.Equal(t, "cancelled", result.State)
 }
-
 
 // TestWorkerHandlerPanic verifies that handler panics are recovered and result
 // in a failed run that can be retried.
@@ -1116,7 +1096,6 @@ func (s *TeguhSuite) TestWorkerHandlerPanic() {
 		require.Fail(t, "timeout waiting for panic recovery and retry")
 	}
 }
-
 
 // TestPortableUuidv7Format verifies that portable_uuidv7() always returns a
 // valid UUIDv7 (version nibble == '7'), regardless of whether pgcrypto is
