@@ -263,7 +263,7 @@ func (s *TeguhSuite) TestSleepAndResume() {
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
 
-	wakeAt := time.Now().Add(100 * time.Millisecond)
+	wakeAt := time.Now().Add(500 * time.Millisecond)
 	require.NoError(t, client.ScheduleRun(ctx, "test_sleep", runs[0].RunID, wakeAt))
 
 	// Task should not be claimable before wake time.
@@ -272,7 +272,7 @@ func (s *TeguhSuite) TestSleepAndResume() {
 	require.Empty(t, immediateRuns, "task must not be claimable before wake time")
 
 	// Wait past wake time, then ticker re-queues it.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(700 * time.Millisecond)
 	n := ticker(t, client)
 	require.GreaterOrEqual(t, n, 1, "ticker must re-queue at least the sleeping task")
 
@@ -705,8 +705,8 @@ func (s *TeguhSuite) TestClaimTaskInlineRecovery() {
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
 
-	// Put task to sleep for 100ms.
-	wakeAt := time.Now().Add(100 * time.Millisecond)
+	// Put task to sleep for 500ms (generous enough for CI latency).
+	wakeAt := time.Now().Add(500 * time.Millisecond)
 	require.NoError(t, client.ScheduleRun(ctx, "test_inline_recovery", runs[0].RunID, wakeAt))
 
 	// Verify not claimable before wake time.
@@ -715,7 +715,7 @@ func (s *TeguhSuite) TestClaimTaskInlineRecovery() {
 	require.Empty(t, none)
 
 	// Wait past wake time. Do NOT call ticker.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(700 * time.Millisecond)
 
 	// claim_task's inline sweep must re-queue and claim the sleeping task.
 	resumed, err := client.ClaimTask(ctx, "test_inline_recovery", "w1", 30, 1)
@@ -736,7 +736,7 @@ func (s *TeguhSuite) TestAvailableAt() {
 	ctx := context.Background()
 
 	res, err := client.SpawnTask(ctx, "test_available_at", "delayed", nil, &teguh.SpawnOptions{
-		AvailableAt: time.Now().Add(200 * time.Millisecond),
+		AvailableAt: time.Now().Add(500 * time.Millisecond),
 	})
 	require.NoError(t, err)
 	require.True(t, res.Created)
@@ -747,7 +747,7 @@ func (s *TeguhSuite) TestAvailableAt() {
 	require.Empty(t, none, "task must not be claimable before available_at")
 
 	// Wait past available_at; inline sweep in next claim_task picks it up.
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(700 * time.Millisecond)
 	runs, err := client.ClaimTask(ctx, "test_available_at", "w1", 30, 1)
 	require.NoError(t, err)
 	require.Len(t, runs, 1, "task must be claimable after available_at elapses")
