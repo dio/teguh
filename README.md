@@ -43,28 +43,25 @@ Teguh works out of the box on every major managed provider. No extension pre-con
 | Heroku Postgres / EDB | ✅ | No restrictions |
 | Railway | ✅ | No official extension list, but no extension needed |
 
-### Why no pgcrypto?
+### pgcrypto auto-detection
 
-Earlier versions required `pgcrypto` for `gen_random_bytes()` inside the UUIDv7 generator.
-This was dropped: `portable_uuidv7()` now uses `uuid_send(gen_random_uuid())` to obtain
-10 random bytes from the cryptographically secure `gen_random_uuid()` built-in (available
-since PostgreSQL 13 with no extension).
+`portable_uuidv7()` defaults to `uuid_send(gen_random_uuid())` — no extension needed.
+If pgcrypto is already installed, `teguh.sql` detects it at install time and automatically
+upgrades the function to use `gen_random_bytes(10)` instead. Re-running `teguh.sql` after
+installing pgcrypto picks up the upgrade with zero per-call overhead.
 
-**Trade-offs of the current approach vs pgcrypto:**
+**Implementation paths:**
 
-| | `uuid_send(gen_random_uuid())` (current) | `gen_random_bytes(10)` (pgcrypto) |
+| | `uuid_send(gen_random_uuid())` (default) | `gen_random_bytes(10)` (pgcrypto auto-upgrade) |
 |---|---|---|
-| Extension required | None | `pgcrypto` |
+| Extension required | None | `pgcrypto` (auto-detected) |
 | Azure extra step | None | Must allowlist via `azure.extensions` param |
 | Random source | OS CSPRNG via `gen_random_uuid()` | OS CSPRNG directly |
 | Bytes of entropy | 80 bits (first 10 of 16) | 80 bits |
 | Performance | One UUID generation + substr | One syscall |
 | Portability | All providers, all PG14+ | All providers except possibly Railway |
 
-Both approaches provide 80 bits of random data from the operating system's CSPRNG.
-The only material difference is that the current approach allocates a temporary UUID and
-discards 6 bytes, which is negligible. If you already have pgcrypto installed for other
-reasons (PGP encryption, password hashing, etc.), it coexists harmlessly.
+Both paths provide 80 bits of OS CSPRNG entropy. The difference is negligible in practice.
 
 ## Installation
 
