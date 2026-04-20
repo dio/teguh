@@ -129,7 +129,11 @@ func (tc *TaskContext) SleepUntil(ctx context.Context, t time.Time) error {
 // event was already available or on timeout resume.
 func (tc *TaskContext) AwaitEvent(ctx context.Context, stepName, eventName string, timeout ...time.Duration) (json.RawMessage, error) {
 	// Cache hit: step was completed on a prior attempt.
+	// A cached value of "null" means the event timed out; return nil payload.
 	if raw, ok := tc.checkpoints[stepName]; ok {
+		if string(raw) == "null" {
+			return nil, nil
+		}
 		return raw, nil
 	}
 
@@ -150,9 +154,13 @@ func (tc *TaskContext) AwaitEvent(ctx context.Context, stepName, eventName strin
 		return nil, ErrSuspended
 	}
 
-	// Event was already emitted (or timeout resumed with nil payload).
-	// Cache it so replay is immediate.
-	if payload != nil {
+	// Event was already emitted, or the wait timed out (nil payload).
+	// Cache the result so replay is immediate. A nil payload is stored as the
+	// JSON null sentinel so the fast-path above can distinguish it from a
+	// genuine cache miss.
+	if payload == nil {
+		tc.checkpoints[stepName] = json.RawMessage("null")
+	} else {
 		tc.checkpoints[stepName] = payload
 	}
 	return payload, nil

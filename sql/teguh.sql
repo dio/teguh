@@ -655,13 +655,14 @@ declare
   v_task_state text;
   v_now       timestamptz := teguh.current_time();
 begin
-  -- Verify run exists and lock it
+  -- Verify run exists and lock both r_<q> and t_<q> to prevent concurrent
+  -- state mutations (e.g., cancel_task racing with complete_run).
   execute format(
     'select r.task_id, t.state
        from teguh.%I r
        join teguh.%I t on t.task_id = r.task_id
       where r.run_id = $1
-      for update of r',
+      for update',
     'r_' || p_queue_name,
     't_' || p_queue_name
   )
@@ -788,30 +789,25 @@ declare
   v_last_attempt_run uuid := p_run_id;
   v_cancelled_at     timestamptz := null;
 begin
-  -- Lock the run to assert ownership
+  -- Lock both r_<q> and t_<q> in a single query to eliminate the TOCTOU window
+  -- between the two separate lock acquisitions. Lock order matches cancel_task:
+  -- r_ then t_ (via JOIN, Postgres locks in row-fetch order which is r_ first).
   execute format(
-    'select r.task_id, r.attempt
+    'select r.task_id, r.attempt,
+            t.retry_strategy, t.max_attempts, t.first_started_at, t.cancellation
        from teguh.%I r
+       join teguh.%I t on t.task_id = r.task_id
       where r.run_id = $1
       for update',
-    'r_' || p_queue_name
+    'r_' || p_queue_name,
+    't_' || p_queue_name
   )
-  into v_task_id, v_attempt
+  into v_task_id, v_attempt, v_retry_strategy, v_max_attempts, v_first_started, v_cancellation
   using p_run_id;
 
   if v_task_id is null then
     raise exception 'run "%" cannot be failed in queue "%"', p_run_id, p_queue_name;
   end if;
-
-  execute format(
-    'select retry_strategy, max_attempts, first_started_at, cancellation
-       from teguh.%I
-      where task_id = $1
-      for update',
-    't_' || p_queue_name
-  )
-  into v_retry_strategy, v_max_attempts, v_first_started, v_cancellation
-  using v_task_id;
 
   -- Remove the active lease
   execute format(
@@ -1644,7 +1640,10 @@ begin
 
     get diagnostics v_inserted = row_count;
 
-    -- Also expire timed-out event waits (move back to pending)
+    -- Also expire timed-out event waits (move back to pending).
+    -- Write a committed null checkpoint for each expired wait so that
+    -- await_event's fast-path detects the timeout on re-entry and returns
+    -- nil payload immediately, preserving the exactly-once guarantee.
     execute format(
       'with expired as (
            delete from teguh.%I w
@@ -1659,6 +1658,12 @@ begin
                   wake_event   = null
             where t.task_id in (select task_id from expired)
               and t.state = ''sleeping''
+       ),
+       cp_write as (
+           insert into teguh.%I (task_id, checkpoint_name, state, status, owner_run_id, updated_at)
+           select e.task_id, e.step_name, ''null''::jsonb, ''committed'', e.run_id, $1
+             from expired e
+            on conflict (task_id, checkpoint_name) do nothing
        )
        insert into teguh.%I (task_id, attempt, available_at)
        select t.task_id, t.attempts + 1, $1
@@ -1667,6 +1672,7 @@ begin
         on conflict (task_id) do nothing',
       'w_' || v_queue.queue_name,
       't_' || v_queue.queue_name,
+      'c_' || v_queue.queue_name,
       'p_' || v_queue.queue_name,
       't_' || v_queue.queue_name
     )
