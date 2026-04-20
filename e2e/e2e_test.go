@@ -53,10 +53,10 @@ func TestMain(m *testing.M) {
 	// Install teguh schema. Run 'make fetch-schema' to copy sql/teguh.sql first.
 	schema, err := os.ReadFile("testdata/teguh.sql")
 	if errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintln(os.Stderr, "testdata/teguh.sql not found, run 'make fetch-schema' then re-run tests")
+		fmt.Fprintln(os.Stderr, "SETUP ERROR: testdata/teguh.sql not found — run 'make fetch-schema' then re-run tests")
 		testPool.Close()
 		_ = pg.Stop()
-		os.Exit(0) // skip rather than fail
+		os.Exit(2) // non-zero: setup error must not look like a pass in CI
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "read teguh.sql: %v\n", err)

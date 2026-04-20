@@ -643,42 +643,34 @@ func TestAwaitEventTimeout(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, runs, 1)
 
-	// Suspend waiting for an event with a 100ms timeout.
-	timeoutSecs := 0 // 0 rounds up to immediate in SQL; use 1 for at least 1s
-	// Use a proper short timeout via direct DB call (1 second minimum via int).
-	// Instead, set fake_now to force expiry by calling ticker after waiting.
-	shouldSuspend, payload, err := client.AwaitEvent(
+	// Suspend with a 1-second timeout; task must always take the suspend path.
+	timeoutSecs := 1
+	shouldSuspend, _, err := client.AwaitEvent(
 		ctx, "test_event_timeout", runs[0].TaskID, runs[0].RunID,
 		"wait-step", "never.fires", &timeoutSecs,
 	)
 	require.NoError(t, err)
-	// A timeout of 0 seconds means already expired, so SQL may return
-	// shouldSuspend=false immediately with a nil/null payload.
-	// Either path (immediate timeout or suspend) is acceptable; test both.
-	if shouldSuspend {
-		// Task suspended. Ticker will expire the wait and re-queue.
-		ticker(t, client)
+	require.True(t, shouldSuspend, "task must suspend while waiting for event")
 
-		resumed, err := client.ClaimTask(ctx, "test_event_timeout", "w1", 30, 1)
-		require.NoError(t, err)
-		require.Len(t, resumed, 1, "task must be re-queued after wait timeout")
-		require.Equal(t, res.TaskID, resumed[0].TaskID)
+	// Wait for the 1-second timeout to expire, then ticker re-queues the task.
+	time.Sleep(1100 * time.Millisecond)
+	ticker(t, client)
 
-		// On re-entry AwaitEvent must return nil payload (timeout), not suspend.
-		shouldSuspend2, payload2, err := client.AwaitEvent(
-			ctx, "test_event_timeout", resumed[0].TaskID, resumed[0].RunID,
-			"wait-step", "never.fires", nil,
-		)
-		require.NoError(t, err)
-		require.False(t, shouldSuspend2, "second entry must not suspend: checkpoint hit")
-		require.Nil(t, payload2, "timed-out wait must return nil payload, not JSON null")
+	resumed, err := client.ClaimTask(ctx, "test_event_timeout", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Len(t, resumed, 1, "task must be re-queued after wait timeout")
+	require.Equal(t, res.TaskID, resumed[0].TaskID)
 
-		require.NoError(t, client.CompleteRun(ctx, "test_event_timeout", resumed[0].RunID, nil))
-	} else {
-		// Timeout was already expired at call time (0s). Payload must be nil.
-		require.Nil(t, payload, "expired timeout must yield nil payload")
-		require.NoError(t, client.CompleteRun(ctx, "test_event_timeout", runs[0].RunID, nil))
-	}
+	// On re-entry AwaitEvent must return nil payload (timeout), not suspend.
+	shouldSuspend2, payload2, err := client.AwaitEvent(
+		ctx, "test_event_timeout", resumed[0].TaskID, resumed[0].RunID,
+		"wait-step", "never.fires", nil,
+	)
+	require.NoError(t, err)
+	require.False(t, shouldSuspend2, "second entry must not suspend: checkpoint hit")
+	require.Nil(t, payload2, "timed-out wait must return nil payload, not JSON null")
+
+	require.NoError(t, client.CompleteRun(ctx, "test_event_timeout", resumed[0].RunID, nil))
 
 	result, err := client.GetTaskResult(ctx, "test_event_timeout", res.TaskID)
 	require.NoError(t, err)

@@ -184,7 +184,18 @@ func (w *Worker) executeRun(ctx context.Context, run Run) {
 	stopHB := w.startHeartbeat(ctx, run, log)
 	defer stopHB() // safety net for early returns via panic
 
-	herr := handler(ctx, tc)
+	// Recover from handler panics: fail the run so it can be retried rather
+	// than leaving the lease dangling in r_<q> until heartbeat expiry.
+	var herr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.ErrorContext(ctx, "teguh: handler panicked", "panic", r)
+				herr = fmt.Errorf("handler panic: %v", r)
+			}
+		}()
+		herr = handler(ctx, tc)
+	}()
 
 	// Stop heartbeat before any state-changing DB call to avoid extending
 	// a claim that is about to be released.

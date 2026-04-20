@@ -67,7 +67,7 @@ declare
   v_hex     text;
   v_b       bytea;
 begin
-  v_millis := (extract(epoch from clock_timestamp()) * 1000)::bigint;
+  v_millis := (extract(epoch from teguh.current_time()) * 1000)::bigint;
   v_hex    := lpad(to_hex(v_millis), 12, '0');
   v_b      := gen_random_bytes(10);
   return (
@@ -1041,11 +1041,13 @@ declare
   v_task_state      text;
   v_claim_expires_at timestamptz;
 begin
+  -- Lock the run row first to prevent TOCTOU with cancel_task.
   execute format(
     'select t.state, r.claim_expires_at
        from teguh.%I r
        join teguh.%I t on t.task_id = r.task_id
-      where r.run_id = $1',
+      where r.run_id = $1
+      for update of r',
     'r_' || p_queue_name,
     't_' || p_queue_name
   )
@@ -1060,11 +1062,14 @@ begin
     raise exception sqlstate 'AB001' using message = 'task has been cancelled';
   end if;
 
+  -- Skip heartbeat update for no-timeout leases (claim_expires_at IS NULL) to
+  -- avoid accidentally starting a countdown on an infinite lease.
   execute format(
     'update teguh.%I
         set claim_expires_at = greatest(claim_expires_at, $2) + make_interval(secs => $3),
             last_heartbeat   = $2
-      where run_id = $1',
+      where run_id = $1
+        and claim_expires_at is not null',
     'r_' || p_queue_name
   )
   using p_run_id, v_now, p_extend_by;
@@ -1122,24 +1127,19 @@ begin
     raise exception 'run "%" not found in queue "%"', p_run_id, p_queue_name;
   end if;
 
+  -- Return all committed checkpoints. The attempt-ordering filter (NOT EXISTS on
+  -- r_<q>) was dead code: r_<q> UNIQUE(task_id) prevents two concurrent active
+  -- runs for the same task, so no higher-attempt run can exist in r_<q> while
+  -- this run is active.
   return query execute format(
     'select c.checkpoint_name, c.state
        from teguh.%I c
       where c.task_id = $1
         and c.status = ''committed''
-        and (
-          c.owner_run_id is null
-          or not exists (
-            select 1 from teguh.%I r2
-             where r2.run_id = c.owner_run_id
-               and r2.attempt > $2
-          )
-        )
       order by c.checkpoint_name',
-    'c_' || p_queue_name,
-    'r_' || p_queue_name
+    'c_' || p_queue_name
   )
-  using p_task_id, v_attempt;
+  using p_task_id;
 end;
 $$;
 
@@ -1384,9 +1384,10 @@ begin
          select t.task_id, t.attempts + 1, $2
            from expired_waits ew
            join teguh.%4$I t on t.task_id = ew.task_id
-          where not exists (
-            select 1 from teguh.%5$I r where r.task_id = t.task_id
-          )
+          where t.state != ''cancelled''
+            and not exists (
+              select 1 from teguh.%5$I r where r.task_id = t.task_id
+            )
          on conflict (task_id) do nothing
      ),
      active_waiters as (
@@ -1419,6 +1420,7 @@ begin
          select t.task_id, t.attempts + 1, $2, $1, $3
            from active_waiters aw
            join teguh.%4$I t on t.task_id = aw.task_id
+          where t.state != ''cancelled''
          on conflict (task_id) do nothing
          returning task_id
      )
@@ -1719,9 +1721,10 @@ begin
        select t.task_id, t.attempts + 1, $1
          from expired e
          join teguh.%I t on t.task_id = e.task_id
-        where not exists (
-          select 1 from teguh.%I r where r.task_id = t.task_id
-        )
+        where t.state != ''cancelled''
+          and not exists (
+            select 1 from teguh.%I r where r.task_id = t.task_id
+          )
         on conflict (task_id) do nothing',
       'w_' || v_queue.queue_name,
       't_' || v_queue.queue_name,
@@ -1780,6 +1783,14 @@ begin
             and enqueue_at < $1
           limit $2
      ),
+     del_waits as (
+         delete from teguh.%3$I
+          where task_id in (select task_id from to_delete)
+     ),
+     del_pending as (
+         delete from teguh.%4$I
+          where task_id in (select task_id from to_delete)
+     ),
      del_ckpts as (
          delete from teguh.%2$I
           where task_id in (select task_id from to_delete)
@@ -1787,7 +1798,9 @@ begin
      delete from teguh.%1$I
       where task_id in (select task_id from to_delete)',
     't_' || p_queue_name,
-    'c_' || p_queue_name
+    'c_' || p_queue_name,
+    'w_' || p_queue_name,
+    'p_' || p_queue_name
   )
   using v_cutoff, v_limit;
 
