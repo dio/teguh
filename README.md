@@ -254,22 +254,55 @@ If pg_cron is not installed, `teguh.start()` emits a notice and returns without 
 
 ## Development
 
+### Prerequisites
+
+- Go 1.21 or later.
+- No PostgreSQL installation needed — e2e tests start an embedded PostgreSQL instance automatically via [embedded-postgres](https://github.com/fergusstrange/embedded-postgres).
+
+### Workflow
+
 ```sh
-# Copy the SQL schema into e2e/testdata.
+# First-time setup: copy sql/teguh.sql into e2e/testdata.
 make fetch-schema
 
-# Run unit tests.
+# Unit tests (root package).
 make test
 
-# Run e2e tests (starts embedded PostgreSQL automatically).
+# E2e tests — starts embedded PostgreSQL, installs the schema, runs all tests.
 make test.e2e
 
-# Lint all modules.
+# Lint all modules (golangci-lint).
 make lint
 
-# Format all modules.
+# Format all Go code in-place (run before committing).
 make format
 ```
+
+### SQL style
+
+`sql/teguh.sql` is hand-formatted. Automated SQL formatters (pg_format, sql-formatter) do not preserve the style, so formatting is enforced by convention rather than tooling. Please follow these rules when editing:
+
+- **Lowercase keywords** — `create or replace function`, `select`, `insert`, etc.
+- **2-space indentation** inside function bodies and SQL blocks.
+- **No space before `()`** — `current_time()`, not `current_time ()`.
+- **Multi-line function signatures** with each clause on its own line:
+  ```sql
+  create or replace function teguh.my_func(p_arg text)
+    returns void
+    language plpgsql
+  as $$
+  ```
+- **Column-aligned declarations** when a block has multiple variables:
+  ```sql
+  declare
+    v_millis  bigint;
+    v_hex     text;
+    v_b       bytea;
+  ```
+
+### Go formatting
+
+`make format` rewrites Go files in-place via `gofmt` and `goimports`. Run it before committing. `make lint` enforces linter rules but does not check formatting.
 
 ## License
 

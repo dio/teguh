@@ -89,6 +89,40 @@ begin
 end;
 $$;
 
+-- If pgcrypto is installed, upgrade portable_uuidv7() to use gen_random_bytes(10)
+-- directly instead of the uuid_send() fallback. Both yield 80 bits of CSPRNG
+-- entropy from the OS; this path avoids the intermediate UUID allocation.
+-- Re-running teguh.sql after installing pgcrypto picks up the upgrade automatically.
+do $detect$
+begin
+  if exists (select 1 from pg_extension where extname = 'pgcrypto') then
+    execute $f$
+      create or replace function teguh.portable_uuidv7()
+        returns uuid
+        language plpgsql volatile
+      as $body$
+      declare
+        v_millis  bigint;
+        v_hex     text;
+        v_b       bytea;
+      begin
+        v_millis := (extract(epoch from teguh.current_time()) * 1000)::bigint;
+        v_hex    := lpad(to_hex(v_millis), 12, '0');
+        v_b      := gen_random_bytes(10);
+        return (
+          substring(v_hex, 1, 8) || '-' ||
+          substring(v_hex, 9, 4) || '-' ||
+          '7' || lpad(to_hex((get_byte(v_b, 0) & 15)), 3, '0') || '-' ||
+          to_hex((get_byte(v_b, 1) & 63) | 128) ||
+          lpad(to_hex(get_byte(v_b, 2)), 2, '0') || '-' ||
+          encode(substring(v_b, 4, 6), 'hex')
+        )::uuid;
+      end;
+      $body$
+    $f$;
+  end if;
+end $detect$;
+
 -- ============================================================
 -- Queue name validation
 -- ============================================================

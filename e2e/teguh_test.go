@@ -7,17 +7,30 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/stretchr/testify/suite"
 
 	teguh "github.com/dio/teguh"
 )
 
-// helpers
+// TeguhSuite groups all e2e tests. TestMain (in e2e_test.go) starts the
+// embedded PostgreSQL instance and installs the schema before the suite runs.
+type TeguhSuite struct {
+	suite.Suite
+}
+
+// TestTeguhSuite is the single go test entry point for the entire suite.
+func TestTeguhSuite(t *testing.T) {
+	suite.Run(t, new(TeguhSuite))
+}
+
+// ─── helpers ────────────────────────────────────────────────────────────────
 
 func newClient(t *testing.T) *teguh.Client {
 	t.Helper()
@@ -32,8 +45,7 @@ func setupQueue(t *testing.T, client *teguh.Client, queue string) {
 	ctx := context.Background()
 	require.NoError(t, client.CreateQueue(ctx, queue), "create_queue")
 	t.Cleanup(func() {
-		ctx := context.Background()
-		_ = client.DropQueue(ctx, queue)
+		_ = client.DropQueue(context.Background(), queue)
 	})
 }
 
@@ -45,9 +57,10 @@ func ticker(t *testing.T, client *teguh.Client) int {
 	return n
 }
 
-// basic lifecycle
+// ─── basic lifecycle ─────────────────────────────────────────────────────────
 
-func TestSpawnTask(t *testing.T) {
+func (s *TeguhSuite) TestSpawnTask() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_spawn")
 	ctx := context.Background()
@@ -59,7 +72,8 @@ func TestSpawnTask(t *testing.T) {
 	require.Equal(t, 1, res.Attempt)
 }
 
-func TestSpawnClaimComplete(t *testing.T) {
+func (s *TeguhSuite) TestSpawnClaimComplete() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_scc")
 	ctx := context.Background()
@@ -88,7 +102,8 @@ func TestSpawnClaimComplete(t *testing.T) {
 	require.Equal(t, 1, result.Attempts)
 }
 
-func TestClaimEmptyQueue(t *testing.T) {
+func (s *TeguhSuite) TestClaimEmptyQueue() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_empty")
 
@@ -97,9 +112,10 @@ func TestClaimEmptyQueue(t *testing.T) {
 	require.Empty(t, runs)
 }
 
-// idempotency
+// ─── idempotency ─────────────────────────────────────────────────────────────
 
-func TestIdempotencyKey(t *testing.T) {
+func (s *TeguhSuite) TestIdempotencyKey() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_idem")
 	ctx := context.Background()
@@ -115,9 +131,10 @@ func TestIdempotencyKey(t *testing.T) {
 	require.Equal(t, r1.TaskID, r2.TaskID)
 }
 
-// retry
+// ─── retry ───────────────────────────────────────────────────────────────────
 
-func TestRetryOnFail(t *testing.T) {
+func (s *TeguhSuite) TestRetryOnFail() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_retry")
 	ctx := context.Background()
@@ -127,7 +144,7 @@ func TestRetryOnFail(t *testing.T) {
 		MaxAttempts: &maxAttempts,
 		RetryStrategy: map[string]any{
 			"kind":         "fixed",
-			"base_seconds": 0, // no delay in tests
+			"base_seconds": 0,
 		},
 	})
 	require.NoError(t, err)
@@ -160,7 +177,8 @@ func TestRetryOnFail(t *testing.T) {
 	require.Equal(t, 3, result.Attempts)
 }
 
-func TestExhaustedRetries(t *testing.T) {
+func (s *TeguhSuite) TestExhaustedRetries() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_exhaust")
 	ctx := context.Background()
@@ -185,9 +203,10 @@ func TestExhaustedRetries(t *testing.T) {
 	require.Equal(t, "failed", result.State)
 }
 
-// step checkpoints
+// ─── step checkpoints ────────────────────────────────────────────────────────
 
-func TestStepCheckpointExactlyOnce(t *testing.T) {
+func (s *TeguhSuite) TestStepCheckpointExactlyOnce() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_steps")
 	ctx := context.Background()
@@ -229,15 +248,15 @@ func TestStepCheckpointExactlyOnce(t *testing.T) {
 
 	require.NoError(t, client.CompleteRun(ctx, "test_steps", runs[0].RunID, nil))
 
-	// The task for res.TaskID should now be completed.
 	result, err := client.GetTaskResult(ctx, "test_steps", res.TaskID)
 	require.NoError(t, err)
 	require.Equal(t, "completed", result.State)
 }
 
-// sleep and resume
+// ─── sleep and resume ────────────────────────────────────────────────────────
 
-func TestSleepAndResume(t *testing.T) {
+func (s *TeguhSuite) TestSleepAndResume() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_sleep")
 	ctx := context.Background()
@@ -272,9 +291,10 @@ func TestSleepAndResume(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_sleep", runs2[0].RunID, nil))
 }
 
-// events
+// ─── events ──────────────────────────────────────────────────────────────────
 
-func TestAwaitAndEmitEvent(t *testing.T) {
+func (s *TeguhSuite) TestAwaitAndEmitEvent() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_events")
 	ctx := context.Background()
@@ -326,7 +346,8 @@ func TestAwaitAndEmitEvent(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_events", resumedRuns[0].RunID, nil))
 }
 
-func TestEmitBeforeAwait(t *testing.T) {
+func (s *TeguhSuite) TestEmitBeforeAwait() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_early_emit")
 	ctx := context.Background()
@@ -357,9 +378,10 @@ func TestEmitBeforeAwait(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_early_emit", runs[0].RunID, nil))
 }
 
-// cancellation
+// ─── cancellation ────────────────────────────────────────────────────────────
 
-func TestCancelPendingTask(t *testing.T) {
+func (s *TeguhSuite) TestCancelPendingTask() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_cancel")
 	ctx := context.Background()
@@ -379,9 +401,10 @@ func TestCancelPendingTask(t *testing.T) {
 	require.Equal(t, "cancelled", result.State)
 }
 
-// manual retry
+// ─── manual retry ────────────────────────────────────────────────────────────
 
-func TestManualRetry(t *testing.T) {
+func (s *TeguhSuite) TestManualRetry() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_manual_retry")
 	ctx := context.Background()
@@ -413,9 +436,10 @@ func TestManualRetry(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_manual_retry", runs2[0].RunID, nil))
 }
 
-// Worker high-level API
+// ─── Worker high-level API ───────────────────────────────────────────────────
 
-func TestWorkerBasicDispatch(t *testing.T) {
+func (s *TeguhSuite) TestWorkerBasicDispatch() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_worker_basic")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -457,7 +481,8 @@ func TestWorkerBasicDispatch(t *testing.T) {
 	}
 }
 
-func TestWorkerConcurrency(t *testing.T) {
+func (s *TeguhSuite) TestWorkerConcurrency() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_worker_conc")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -503,7 +528,8 @@ func TestWorkerConcurrency(t *testing.T) {
 	}
 }
 
-func TestWorkerCatchAll(t *testing.T) {
+func (s *TeguhSuite) TestWorkerCatchAll() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_worker_catchall")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -539,7 +565,7 @@ func TestWorkerCatchAll(t *testing.T) {
 	}
 }
 
-// durable execution multi-step workflow
+// ─── durable execution multi-step workflow ──────────────────────────────────
 
 // TestDurableMultiStep simulates the "order fulfillment" workflow:
 //
@@ -550,7 +576,8 @@ func TestWorkerCatchAll(t *testing.T) {
 //
 // On the second attempt (simulating a crash after charge-card) the first two
 // steps must be replayed from checkpoints without executing the functions again.
-func TestDurableMultiStep(t *testing.T) {
+func (s *TeguhSuite) TestDurableMultiStep() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_durable")
 	ctx := context.Background()
@@ -621,17 +648,13 @@ func TestDurableMultiStep(t *testing.T) {
 	require.Equal(t, "completed", result.State)
 }
 
-// Worker Step and SleepFor end-to-end
-
-// TestWorkerSleepResume uses the Worker's high-level API to test that a
-// handler can call tc.SleepFor, the task suspends, the ticker re-queues it,
-// and the worker picks it up and completes it on the second execution.
-// event-wait timeout
+// ─── event-wait timeout ──────────────────────────────────────────────────────
 
 // TestAwaitEventTimeout verifies that a task suspended waiting for an event
 // with a timeout is re-queued when the timeout expires, and that the second
 // call to AwaitEvent returns nil payload (not a JSON null sentinel).
-func TestAwaitEventTimeout(t *testing.T) {
+func (s *TeguhSuite) TestAwaitEventTimeout() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_event_timeout")
 	ctx := context.Background()
@@ -677,12 +700,13 @@ func TestAwaitEventTimeout(t *testing.T) {
 	require.Equal(t, "completed", result.State)
 }
 
-// claim_task inline recovery sweep
+// ─── claim_task inline recovery sweep ───────────────────────────────────────
 
 // TestClaimTaskInlineRecovery verifies that claim_task's inline recovery sweep
 // re-queues sleeping tasks whose wake time has arrived even when ticker has not
 // been called explicitly.
-func TestClaimTaskInlineRecovery(t *testing.T) {
+func (s *TeguhSuite) TestClaimTaskInlineRecovery() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_inline_recovery")
 	ctx := context.Background()
@@ -715,11 +739,12 @@ func TestClaimTaskInlineRecovery(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_inline_recovery", resumed[0].RunID, nil))
 }
 
-// delayed spawn available_at
+// ─── delayed spawn available_at ──────────────────────────────────────────────
 
 // TestAvailableAt verifies that a task spawned with a future available_at is
 // not claimable before that time but becomes claimable after.
-func TestAvailableAt(t *testing.T) {
+func (s *TeguhSuite) TestAvailableAt() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_available_at")
 	ctx := context.Background()
@@ -745,11 +770,12 @@ func TestAvailableAt(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_available_at", runs[0].RunID, nil))
 }
 
-// RetryTask spawn_new
+// ─── RetryTask spawn_new ─────────────────────────────────────────────────────
 
 // TestRetryTaskSpawnNew verifies that RetryTask with spawn_new=true creates a
 // new task (new task_id) while leaving the original in its terminal state.
-func TestRetryTaskSpawnNew(t *testing.T) {
+func (s *TeguhSuite) TestRetryTaskSpawnNew() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_retry_spawn_new")
 	ctx := context.Background()
@@ -787,20 +813,19 @@ func TestRetryTaskSpawnNew(t *testing.T) {
 	require.Equal(t, "failed", orig2.State)
 }
 
-// Worker AwaitEvent end-to-end
+// ─── Worker AwaitEvent end-to-end ────────────────────────────────────────────
 
 // TestWorkerAwaitEvent uses the Worker's high-level API to test that a handler
 // can call tc.AwaitEvent, the task suspends, emit_event wakes it, and the
 // worker completes it with the event payload.
-func TestWorkerAwaitEvent(t *testing.T) {
+func (s *TeguhSuite) TestWorkerAwaitEvent() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_worker_event")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	type result struct {
-		tracking string
-	}
+	type result struct{ tracking string }
 	done := make(chan result, 1)
 
 	w := client.NewWorker("test_worker_event",
@@ -850,7 +875,8 @@ func TestWorkerAwaitEvent(t *testing.T) {
 	}
 }
 
-func TestWorkerSleepResume(t *testing.T) {
+func (s *TeguhSuite) TestWorkerSleepResume() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_worker_sleep")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -885,7 +911,6 @@ func TestWorkerSleepResume(t *testing.T) {
 	})
 
 	// Seed the ticker goroutine: periodically call Ticker so sleeping tasks wake.
-	// Use a dedicated stop channel so the goroutine exits as soon as the test ends.
 	tickerStop := make(chan struct{})
 	go func() {
 		for {
@@ -913,9 +938,12 @@ func TestWorkerSleepResume(t *testing.T) {
 	}
 }
 
-// Critical #2: await_event must store NULL available_at for no-timeout waits.
-// Ticker must not re-queue such tasks; only emit_event should wake them.
-func TestAwaitEventNoTimeoutNullAvailableAt(t *testing.T) {
+// ─── Critical #2: await_event NULL available_at ──────────────────────────────
+
+// TestAwaitEventNoTimeoutNullAvailableAt verifies that await_event stores
+// NULL available_at for no-timeout waits, so ticker never re-queues them.
+func (s *TeguhSuite) TestAwaitEventNoTimeoutNullAvailableAt() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_null_await")
 	ctx := context.Background()
@@ -961,8 +989,12 @@ func TestAwaitEventNoTimeoutNullAvailableAt(t *testing.T) {
 	require.NoError(t, client.CompleteRun(ctx, "test_null_await", woken[0].RunID, nil))
 }
 
-// Critical #4: concurrent cancel and complete must not deadlock; exactly one wins.
-func TestConcurrentCancelVsComplete(t *testing.T) {
+// ─── Critical #4: concurrent cancel vs complete ───────────────────────────────
+
+// TestConcurrentCancelVsComplete races cancel against complete and verifies no
+// deadlock and that the final state is terminal.
+func (s *TeguhSuite) TestConcurrentCancelVsComplete() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_cancel_vs_complete")
 	ctx := context.Background()
@@ -1010,8 +1042,12 @@ func TestConcurrentCancelVsComplete(t *testing.T) {
 		"final state must be a terminal state")
 }
 
-// Critical #11: emit_event must not re-queue a task that was cancelled while waiting.
-func TestCancelledTaskNotRequeueOnEmit(t *testing.T) {
+// ─── Critical #11: cancelled task not re-queued on emit ──────────────────────
+
+// TestCancelledTaskNotRequeueOnEmit verifies that emit_event does not re-queue
+// a task that was cancelled while waiting for that event.
+func (s *TeguhSuite) TestCancelledTaskNotRequeueOnEmit() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_cancel_emit")
 	ctx := context.Background()
@@ -1048,8 +1084,12 @@ func TestCancelledTaskNotRequeueOnEmit(t *testing.T) {
 	require.Equal(t, "cancelled", result.State)
 }
 
-// Issue #20: handler panics must be recovered and result in a failed run.
-func TestWorkerHandlerPanic(t *testing.T) {
+// ─── Issue #20: handler panic recovery ───────────────────────────────────────
+
+// TestWorkerHandlerPanic verifies that handler panics are recovered and result
+// in a failed run that can be retried.
+func (s *TeguhSuite) TestWorkerHandlerPanic() {
+	t := s.T()
 	client := newClient(t)
 	setupQueue(t, client, "test_panic")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1094,5 +1134,40 @@ func TestWorkerHandlerPanic(t *testing.T) {
 		require.Equal(t, "completed", result.State)
 	case <-ctx.Done():
 		require.Fail(t, "timeout waiting for panic recovery and retry")
+	}
+}
+
+// ─── pgcrypto auto-detection ─────────────────────────────────────────────────
+
+// TestPortableUuidv7Format verifies that portable_uuidv7() always returns a
+// valid UUIDv7 (version nibble == '7'), regardless of whether pgcrypto is
+// installed or the uuid_send fallback is active.
+func (s *TeguhSuite) TestPortableUuidv7Format() {
+	t := s.T()
+	ctx := context.Background()
+
+	// Report which implementation is active.
+	var hasPgcrypto bool
+	require.NoError(t,
+		testPool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto')`).
+			Scan(&hasPgcrypto))
+	if hasPgcrypto {
+		t.Log("pgcrypto installed — portable_uuidv7() uses gen_random_bytes(10)")
+	} else {
+		t.Log("pgcrypto not installed — portable_uuidv7() uses uuid_send(gen_random_uuid()) fallback")
+	}
+
+	// Generate several UUIDs and validate UUIDv7 format.
+	for i := 0; i < 10; i++ {
+		var id string
+		require.NoError(t,
+			testPool.QueryRow(ctx, `SELECT teguh.portable_uuidv7()`).Scan(&id))
+		require.Len(t, id, 36, "UUID must be 36 characters: %s", id)
+		parts := strings.Split(id, "-")
+		require.Len(t, parts, 5, "UUID must have 5 dash-separated groups: %s", id)
+		// The version nibble is the first hex digit of the third group.
+		require.Equal(t, "7", string(parts[2][0]),
+			"version nibble must be '7' for UUIDv7: %s", id)
 	}
 }
