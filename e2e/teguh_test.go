@@ -625,6 +625,238 @@ func TestDurableMultiStep(t *testing.T) {
 // TestWorkerSleepResume uses the Worker's high-level API to test that a
 // handler can call tc.SleepFor, the task suspends, the ticker re-queues it,
 // and the worker picks it up and completes it on the second execution.
+// ── event-wait timeout ────────────────────────────────────────────────────────
+
+// TestAwaitEventTimeout verifies that a task suspended waiting for an event
+// with a timeout is re-queued when the timeout expires, and that the second
+// call to AwaitEvent returns nil payload (not a JSON null sentinel).
+func TestAwaitEventTimeout(t *testing.T) {
+	client := newClient(t)
+	setupQueue(t, client, "test_event_timeout")
+	ctx := context.Background()
+
+	res, err := client.SpawnTask(ctx, "test_event_timeout", "waiter", nil, nil)
+	require.NoError(t, err)
+
+	runs, err := client.ClaimTask(ctx, "test_event_timeout", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+
+	// Suspend waiting for an event with a 100ms timeout.
+	timeoutSecs := 0 // 0 rounds up to immediate in SQL; use 1 for at least 1s
+	// Use a proper short timeout via direct DB call (1 second minimum via int).
+	// Instead, set fake_now to force expiry by calling ticker after waiting.
+	shouldSuspend, payload, err := client.AwaitEvent(
+		ctx, "test_event_timeout", runs[0].TaskID, runs[0].RunID,
+		"wait-step", "never.fires", &timeoutSecs,
+	)
+	require.NoError(t, err)
+	// A timeout of 0 seconds means already expired, so SQL may return
+	// shouldSuspend=false immediately with a nil/null payload.
+	// Either path (immediate timeout or suspend) is acceptable; test both.
+	if shouldSuspend {
+		// Task suspended. Ticker will expire the wait and re-queue.
+		ticker(t, client)
+
+		resumed, err := client.ClaimTask(ctx, "test_event_timeout", "w1", 30, 1)
+		require.NoError(t, err)
+		require.Len(t, resumed, 1, "task must be re-queued after wait timeout")
+		require.Equal(t, res.TaskID, resumed[0].TaskID)
+
+		// On re-entry AwaitEvent must return nil payload (timeout), not suspend.
+		shouldSuspend2, payload2, err := client.AwaitEvent(
+			ctx, "test_event_timeout", resumed[0].TaskID, resumed[0].RunID,
+			"wait-step", "never.fires", nil,
+		)
+		require.NoError(t, err)
+		require.False(t, shouldSuspend2, "second entry must not suspend: checkpoint hit")
+		require.Nil(t, payload2, "timed-out wait must return nil payload, not JSON null")
+
+		require.NoError(t, client.CompleteRun(ctx, "test_event_timeout", resumed[0].RunID, nil))
+	} else {
+		// Timeout was already expired at call time (0s). Payload must be nil.
+		require.Nil(t, payload, "expired timeout must yield nil payload")
+		require.NoError(t, client.CompleteRun(ctx, "test_event_timeout", runs[0].RunID, nil))
+	}
+
+	result, err := client.GetTaskResult(ctx, "test_event_timeout", res.TaskID)
+	require.NoError(t, err)
+	require.Equal(t, "completed", result.State)
+}
+
+// ── claim_task inline recovery sweep ─────────────────────────────────────────
+
+// TestClaimTaskInlineRecovery verifies that claim_task's inline recovery sweep
+// re-queues sleeping tasks whose wake time has arrived even when ticker has not
+// been called explicitly.
+func TestClaimTaskInlineRecovery(t *testing.T) {
+	client := newClient(t)
+	setupQueue(t, client, "test_inline_recovery")
+	ctx := context.Background()
+
+	res, err := client.SpawnTask(ctx, "test_inline_recovery", "snoozer", nil, nil)
+	require.NoError(t, err)
+
+	runs, err := client.ClaimTask(ctx, "test_inline_recovery", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+
+	// Put task to sleep for 100ms.
+	wakeAt := time.Now().Add(100 * time.Millisecond)
+	require.NoError(t, client.ScheduleRun(ctx, "test_inline_recovery", runs[0].RunID, wakeAt))
+
+	// Verify not claimable before wake time.
+	none, err := client.ClaimTask(ctx, "test_inline_recovery", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Empty(t, none)
+
+	// Wait past wake time. Do NOT call ticker.
+	time.Sleep(200 * time.Millisecond)
+
+	// claim_task's inline sweep must re-queue and claim the sleeping task.
+	resumed, err := client.ClaimTask(ctx, "test_inline_recovery", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Len(t, resumed, 1, "inline recovery sweep must re-queue task without ticker")
+	require.Equal(t, res.TaskID, resumed[0].TaskID)
+
+	require.NoError(t, client.CompleteRun(ctx, "test_inline_recovery", resumed[0].RunID, nil))
+}
+
+// ── delayed spawn (available_at) ──────────────────────────────────────────────
+
+// TestAvailableAt verifies that a task spawned with a future available_at is
+// not claimable before that time but becomes claimable after.
+func TestAvailableAt(t *testing.T) {
+	client := newClient(t)
+	setupQueue(t, client, "test_available_at")
+	ctx := context.Background()
+
+	res, err := client.SpawnTask(ctx, "test_available_at", "delayed", nil, &teguh.SpawnOptions{
+		AvailableAt: time.Now().Add(200 * time.Millisecond),
+	})
+	require.NoError(t, err)
+	require.True(t, res.Created)
+
+	// Not yet claimable.
+	none, err := client.ClaimTask(ctx, "test_available_at", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Empty(t, none, "task must not be claimable before available_at")
+
+	// Wait past available_at; inline sweep in next claim_task picks it up.
+	time.Sleep(300 * time.Millisecond)
+	runs, err := client.ClaimTask(ctx, "test_available_at", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Len(t, runs, 1, "task must be claimable after available_at elapses")
+	require.Equal(t, res.TaskID, runs[0].TaskID)
+
+	require.NoError(t, client.CompleteRun(ctx, "test_available_at", runs[0].RunID, nil))
+}
+
+// ── RetryTask spawn_new ───────────────────────────────────────────────────────
+
+// TestRetryTaskSpawnNew verifies that RetryTask with spawn_new=true creates a
+// new task (new task_id) while leaving the original in its terminal state.
+func TestRetryTaskSpawnNew(t *testing.T) {
+	client := newClient(t)
+	setupQueue(t, client, "test_retry_spawn_new")
+	ctx := context.Background()
+
+	maxAttempts := 1
+	original, err := client.SpawnTask(ctx, "test_retry_spawn_new", "one-shot",
+		map[string]any{"v": 1}, &teguh.SpawnOptions{MaxAttempts: &maxAttempts})
+	require.NoError(t, err)
+
+	runs, err := client.ClaimTask(ctx, "test_retry_spawn_new", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	require.NoError(t, client.FailRun(ctx, "test_retry_spawn_new", runs[0].RunID,
+		map[string]any{"msg": "terminal"}, nil))
+
+	orig, err := client.GetTaskResult(ctx, "test_retry_spawn_new", original.TaskID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", orig.State)
+
+	// spawn_new=true creates a fresh task.
+	spawned, err := client.RetryTask(ctx, "test_retry_spawn_new", original.TaskID, true)
+	require.NoError(t, err)
+	require.NotEqual(t, original.TaskID, spawned.TaskID, "spawn_new must produce a different task_id")
+	require.True(t, spawned.Created)
+
+	runs2, err := client.ClaimTask(ctx, "test_retry_spawn_new", "w1", 30, 1)
+	require.NoError(t, err)
+	require.Len(t, runs2, 1)
+	require.Equal(t, spawned.TaskID, runs2[0].TaskID)
+	require.NoError(t, client.CompleteRun(ctx, "test_retry_spawn_new", runs2[0].RunID, nil))
+
+	// Original remains failed.
+	orig2, err := client.GetTaskResult(ctx, "test_retry_spawn_new", original.TaskID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", orig2.State)
+}
+
+// ── Worker + AwaitEvent end-to-end ────────────────────────────────────────────
+
+// TestWorkerAwaitEvent uses the Worker's high-level API to test that a handler
+// can call tc.AwaitEvent, the task suspends, emit_event wakes it, and the
+// worker completes it with the event payload.
+func TestWorkerAwaitEvent(t *testing.T) {
+	client := newClient(t)
+	setupQueue(t, client, "test_worker_event")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	type result struct {
+		tracking string
+	}
+	done := make(chan result, 1)
+
+	w := client.NewWorker("test_worker_event",
+		teguh.WithPollInterval(100*time.Millisecond),
+		teguh.WithWorkerID("event-worker"),
+	)
+	w.Handle("ship-waiter", func(ctx context.Context, tc *teguh.TaskContext) error {
+		payload, err := tc.AwaitEvent(ctx, "wait-shipped", "order.shipped")
+		if err != nil {
+			return err
+		}
+		var data map[string]any
+		if payload != nil {
+			if err := json.Unmarshal(payload, &data); err != nil {
+				return fmt.Errorf("unmarshal payload: %w", err)
+			}
+		}
+		tracking, _ := data["tracking"].(string)
+		done <- result{tracking: tracking}
+		return nil
+	})
+
+	workerErr := make(chan error, 1)
+	go func() { workerErr <- w.Start(ctx) }()
+	t.Cleanup(func() {
+		if err := <-workerErr; err != nil &&
+			!errors.Is(err, context.Canceled) &&
+			!errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("worker Start: %v", err)
+		}
+	})
+
+	_, err := client.SpawnTask(ctx, "test_worker_event", "ship-waiter", nil, nil)
+	require.NoError(t, err)
+
+	// Give the worker time to claim and suspend.
+	time.Sleep(300 * time.Millisecond)
+
+	require.NoError(t, client.EmitEvent(ctx, "test_worker_event", "order.shipped",
+		map[string]any{"tracking": "XYZ-99"}))
+
+	select {
+	case r := <-done:
+		require.Equal(t, "XYZ-99", r.tracking)
+	case <-ctx.Done():
+		require.Fail(t, "timeout waiting for event-driven task to complete")
+	}
+}
+
 func TestWorkerSleepResume(t *testing.T) {
 	client := newClient(t)
 	setupQueue(t, client, "test_worker_sleep")

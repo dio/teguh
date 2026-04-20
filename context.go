@@ -158,15 +158,14 @@ func (tc *TaskContext) AwaitEvent(ctx context.Context, stepName, eventName strin
 		return nil, ErrSuspended
 	}
 
-	// Event was already emitted, or the wait timed out (nil payload).
-	// Cache the result so replay is immediate. A nil payload is stored as the
-	// JSON null sentinel so the fast-path above can distinguish it from a
-	// genuine cache miss.
-	if payload == nil {
+	// Normalize the SQL 'null'::jsonb timeout sentinel to Go nil so the return
+	// value is consistent with the cache-hit fast path above, which also returns
+	// nil for timeouts. Cache the sentinel so replay skips the DB call.
+	if len(payload) == 0 || string(payload) == "null" {
 		tc.checkpoints[stepName] = json.RawMessage("null")
-	} else {
-		tc.checkpoints[stepName] = payload
+		return nil, nil
 	}
+	tc.checkpoints[stepName] = payload
 	return payload, nil
 }
 

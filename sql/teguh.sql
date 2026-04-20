@@ -559,13 +559,13 @@ begin
     );
   end loop;
 
-  -- Recovery sweep: re-queue sleeping tasks whose wake time has arrived
-  -- (handles cases where ticker hasn't fired yet or pg_cron isn't installed)
+  -- Recovery sweep: re-queue sleeping and delayed-pending tasks whose wake time
+  -- has arrived (handles cases where ticker hasn't fired yet or pg_cron isn't installed).
   execute format(
     'insert into teguh.%I (task_id, attempt, available_at, wake_event)
      select t.task_id, t.attempts + 1, $1, t.wake_event
        from teguh.%I t
-      where t.state = ''sleeping''
+      where t.state in (''sleeping'', ''pending'')
         and t.available_at is not null
         and t.available_at <= $1
         and not exists (
@@ -621,6 +621,14 @@ begin
           where w.task_id = nr.task_id
             and w.timeout_at is not null
             and w.timeout_at <= $1
+          returning w.task_id, w.run_id, w.step_name
+     ),
+     cp_timeout as (
+         insert into teguh.%5$I
+             (task_id, checkpoint_name, state, status, owner_run_id, updated_at)
+         select wc.task_id, wc.step_name, ''null''::jsonb, ''committed'', wc.run_id, $1
+           from wait_cleanup wc
+          on conflict (task_id, checkpoint_name) do nothing
      )
      select
        nr.run_id,
@@ -640,7 +648,8 @@ begin
     'p_' || p_queue_name,
     'r_' || p_queue_name,
     't_' || p_queue_name,
-    'w_' || p_queue_name
+    'w_' || p_queue_name,
+    'c_' || p_queue_name
   )
   using v_now, v_qty, v_worker_id, v_claim_until;
 end;
@@ -1428,10 +1437,11 @@ begin
 
   get diagnostics v_woke_any = row_count;
 
-  if v_woke_any > 0 then
-    -- Notify workers that sleeping tasks are now pending
-    perform pg_notify('teguh_' || p_queue_name, p_event_name);
-  end if;
+  -- Always notify when the event is newly emitted. Expired-wait re-queues
+  -- (inserted by the expired_pending CTE above) do not appear in v_woke_any
+  -- since that counts only the active-waiter DELETE. The notify is harmless
+  -- if no tasks were waiting.
+  perform pg_notify('teguh_' || p_queue_name, p_event_name);
 end;
 $$;
 
@@ -1656,12 +1666,12 @@ begin
      where p_queue_name is null or queue_name = p_queue_name
      order by queue_name
   loop
-    -- Re-queue sleeping tasks whose available_at has arrived
+    -- Re-queue sleeping and delayed-pending tasks whose available_at has arrived.
     execute format(
       'insert into teguh.%I (task_id, attempt, available_at, wake_event)
        select t.task_id, t.attempts + 1, $1, t.wake_event
          from teguh.%I t
-        where t.state = ''sleeping''
+        where t.state in (''sleeping'', ''pending'')
           and t.available_at is not null
           and t.available_at <= $1
           and not exists (

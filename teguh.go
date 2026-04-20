@@ -260,6 +260,11 @@ func (c *Client) AwaitEvent(ctx context.Context, queue, taskID, runID, stepName,
 	if err := rows.Scan(&shouldSuspend, &payloadBytes); err != nil {
 		return false, nil, fmt.Errorf("teguh: scan await_event: %w", err)
 	}
+	// Normalize the 'null'::jsonb timeout sentinel to Go nil so callers receive
+	// nil for both "event timed out" and "event emitted with no payload".
+	if string(payloadBytes) == "null" {
+		payloadBytes = nil
+	}
 	return shouldSuspend, payloadBytes, rows.Err()
 }
 
