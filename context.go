@@ -59,6 +59,13 @@ func (tc *TaskContext) Params() json.RawMessage { return tc.run.Params }
 //	result, err := teguh.Step(ctx, tc, "fetch-user", func(ctx context.Context) (*User, error) {
 //	    return fetchUser(ctx, userID)
 //	})
+//
+// Important constraints:
+//   - Each step name must be unique within a task's lifetime. A duplicate name
+//     returns the first call's cached result silently — this is usually a bug.
+//   - Side effects inside fn must be idempotent: if SetCheckpoint fails after fn
+//     returns, fn will be called again on the next attempt.
+//   - TaskContext is not goroutine-safe; do not share it across goroutines.
 func Step[T any](ctx context.Context, tc *TaskContext, name string, fn func(context.Context) (T, error)) (T, error) {
 	var zero T
 
@@ -105,6 +112,10 @@ func (tc *TaskContext) Heartbeat(ctx context.Context, extendBySecs int) error {
 
 // SleepFor suspends the task for duration d. The run will be re-queued after
 // d has elapsed (by the ticker or claim_task's inline recovery sweep).
+//
+// The wake time is computed from the Go process clock (time.Now), not the
+// PostgreSQL server clock. A small clock skew between the two hosts may cause
+// the task to wake slightly earlier or later than intended.
 //
 // Always returns ErrSuspended; the handler must return this error immediately.
 func (tc *TaskContext) SleepFor(ctx context.Context, d time.Duration) error {

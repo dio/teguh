@@ -9,8 +9,11 @@ import (
 
 // SpawnResult is returned by Client.SpawnTask.
 type SpawnResult struct {
-	TaskID  string `json:"task_id"`
-	RunID   string `json:"run_id"` // logical first-attempt ID (informational)
+	TaskID string `json:"task_id"`
+	// RunID is a pre-generated UUID stored as a hint; it is NOT the run ID
+	// that will be active once the task is claimed. Use the run_id returned
+	// by ClaimTask for all run-scoped APIs (CompleteRun, FailRun, etc.).
+	RunID   string `json:"run_id"`
 	Attempt int    `json:"attempt"`
 	Created bool   `json:"created"` // false on idempotency hit
 }

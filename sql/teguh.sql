@@ -96,6 +96,13 @@ begin
   if octet_length(p_queue_name) > 55 then
     raise exception 'queue name "%" is too long (max 55 bytes)', p_queue_name;
   end if;
+  -- Enforce lowercase alphanumeric + underscore to guarantee that the
+  -- pg_notify channel name (a string literal, case-preserved) matches the
+  -- LISTEN channel name constructed by the Go worker. Mixed-case names
+  -- would also create confusing table names.
+  if p_queue_name !~ '^[a-z][a-z0-9_]*$' then
+    raise exception 'queue name "%" must match ^[a-z][a-z0-9_]*$ (lowercase, start with letter)', p_queue_name;
+  end if;
   return p_queue_name;
 end;
 $$;
@@ -1855,7 +1862,8 @@ begin
     return;
   end if;
 
-  -- Ticker: re-queue sleeping tasks every second
+  -- Ticker: re-queue sleeping tasks every minute (pg_cron minimum granularity).
+  -- For sub-minute precision, call teguh.ticker() from your own scheduler.
   select cron.schedule('teguh_ticker', '* * * * *',
     $cmd$select teguh.ticker()$cmd$)
   into v_ticker_id;

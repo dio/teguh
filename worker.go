@@ -44,6 +44,8 @@ type Worker struct {
 
 // Handle registers a handler for the named task. Use "*" to register a
 // catch-all handler for any task name without a specific handler.
+// All Handle calls must complete before calling Start; the handler map
+// is not goroutine-safe after Start begins dispatching.
 func (w *Worker) Handle(taskName string, fn HandlerFunc) {
 	if taskName == "*" {
 		w.catchAll = fn
