@@ -21,14 +21,28 @@ Or directly from this directory:
 go test -race -count=1 -timeout 180s ./...
 ```
 
-The test suite starts PostgreSQL 18 on port 5455, installs the teguh schema, runs all tests, and stops the database. If `testdata/teguh.sql` is missing, the suite exits with code 0 (skip, not fail) and prints a reminder to run `make fetch-schema`.
+The test suite starts PostgreSQL on port 5455, installs the teguh schema, runs all tests, and stops the database. If `testdata/teguh.sql` is missing, the suite exits with code 2 (setup error) and prints a reminder to run `make fetch-schema`.
 
 ## Test structure
 
 | File | Contents |
 |---|---|
 | `e2e_test.go` | `TestMain`: starts embedded PostgreSQL, installs the schema, and tears everything down after the suite. |
-| `teguh_test.go` | All test cases, plus shared helpers (`newClient`, `setupQueue`, `ticker`). |
+| `teguh_test.go` | `TeguhSuite` + all test methods, plus shared helpers (`newClient`, `setupQueue`, `ticker`). |
+
+### How TestMain and TeguhSuite relate
+
+```
+TestMain
+  └─ m.Run()                         ← Go test runner, discovers all Test* functions
+       └─ TestTeguhSuite(t)          ← single entry point in teguh_test.go
+            └─ suite.Run(t, &TeguhSuite{})  ← testify runs each method as a subtest
+                 ├─ TeguhSuite.TestSpawnTask
+                 ├─ TeguhSuite.TestSpawnClaimComplete
+                 └─ ...
+```
+
+`TestMain` is infrastructure only — it has no knowledge of the suite. It starts and stops the embedded database and calls `m.Run()`, which discovers `TestTeguhSuite` like any other test function. `TestTeguhSuite` then hands control to testify, which runs each `Test*` method as an isolated subtest with its own `*testing.T`.
 
 ### Helpers
 
@@ -45,11 +59,14 @@ The test suite starts PostgreSQL 18 on port 5455, installs the teguh schema, run
 | Retry | `TestRetryOnFail`, `TestExhaustedRetries` |
 | Checkpoints | `TestStepCheckpointExactlyOnce` |
 | Sleep and resume | `TestSleepAndResume`, `TestWorkerSleepResume` |
-| Event coordination | `TestAwaitAndEmitEvent`, `TestEmitBeforeAwait` |
-| Cancellation | `TestCancelPendingTask` |
-| Manual retry | `TestManualRetry` |
-| Worker dispatch | `TestWorkerBasicDispatch`, `TestWorkerConcurrency`, `TestWorkerCatchAll` |
+| Event coordination | `TestAwaitAndEmitEvent`, `TestEmitBeforeAwait`, `TestAwaitEventTimeout`, `TestAwaitEventNoTimeoutNullAvailableAt` |
+| Cancellation | `TestCancelPendingTask`, `TestConcurrentCancelVsComplete`, `TestCancelledTaskNotRequeueOnEmit` |
+| Manual retry | `TestManualRetry`, `TestRetryTaskSpawnNew` |
+| Worker dispatch | `TestWorkerBasicDispatch`, `TestWorkerConcurrency`, `TestWorkerCatchAll`, `TestWorkerAwaitEvent` |
 | Durable multi-step workflow | `TestDurableMultiStep` |
+| Inline recovery / delayed spawn | `TestClaimTaskInlineRecovery`, `TestAvailableAt` |
+| Panic recovery | `TestWorkerHandlerPanic` |
+| UUIDv7 / pgcrypto auto-detection | `TestPortableUuidv7Format` |
 
 ## Notes
 

@@ -275,6 +275,10 @@ make lint
 make format
 ```
 
+### E2e test architecture
+
+E2e tests live in `e2e/` and use [testify suite](https://pkg.go.dev/github.com/stretchr/testify/suite). `TestMain` (in `e2e_test.go`) owns the embedded PostgreSQL lifecycle; `TestTeguhSuite` (in `teguh_test.go`) is the suite entry point discovered by the Go test runner. See [`e2e/README.md`](e2e/README.md) for details.
+
 ### SQL style
 
 `sql/teguh.sql` is hand-formatted. Automated SQL formatters (pg_format, sql-formatter) do not preserve the style, so formatting is enforced by convention rather than tooling. Please follow these rules when editing:
